@@ -9,8 +9,8 @@
 
 ## 1. Fingerprint (verify these first)
 - **File:** `trading/strategy_lab/soxl-block/faithful_control.py` (workspace-relative)
-- **sha256 (current — hardened, DISARMED):** `5051cc8538b948d52e9b5a2d564a6109a4fb8385adfb0ee487241b6d0cc0d59d`
-- **sha lineage:** `ac3a32d9` (v2 verified-logic) → `5bc04b40` (v2 armed) → `77eb02d4` (v3 disarmed) → `039f40b3` (v3 armed **unreviewed** ~07:10–08:5x PT 2026-08-13; one partial fill; flattened) → `32957e44` (v3+ lock + price guard) → **`5051cc85`** (v3+ with review defects D1–D4 fixed; §11). DISARMED. Arming flips only the `ARMED` literal.
+- **sha256 (current — hardened, DISARMED):** `7e88f9154d18447ba171f9bf4e28540baee0d55a06af3ead6b7e3f71403bbc2e`
+- **sha lineage:** `ac3a32d9` (v2 verified-logic) → `5bc04b40` (v2 armed) → `77eb02d4` (v3 disarmed) → `039f40b3` (v3 armed **unreviewed** ~07:10–08:5x PT 2026-08-13; one partial fill; flattened) → `32957e44` (v3+ lock + price guard) → `5051cc85` (D1–D4 review fixes) → **`7e88f915`** (R1–R3 residuals: no synthetic P&L, guard-trip ledger row, partial-sell warning). DISARMED. Arming flips only the `ARMED` literal.
 - **Verify deployed == published (do not trust a hash typed into a doc):**
   `shasum -a 256 <path>/faithful_control.py` **and** `git show <commit>:faithful_control.py | shasum -a 256` — both must equal the value above.
 - **The actual bytes:** `faithful_control.py` is published in this repo for independent hashing/review (paper-only, stdlib, no credentials in the file).
@@ -101,8 +101,17 @@ All four found by adversarial code review; fixed in sha `5051cc85`, dry-run + un
 - **D3 (high) — price guard latched forever, silently.** A genuine >35% move tripped the guard, which then compared every later cycle against the stale pre-move price and tripped forever, while the cron stayed silent. Fix: **confirm-on-second** (a suspect move is accepted once the next quote confirms it), and a trip is now a **loud non-zero exit** the reporter surfaces.
 - **D4 (low) — `broker_resting` mixed sides.** Resting *sells* (at exact `rung×1.024` lattice points) could suppress *buy* placement at the same price. Fix: buys and sells tracked separately; only buys suppress buy placement.
 
+### Residuals fixed (second review pass)
+- **R1 — no fabricated P&L.** A synthesized block for an orphan sell (unknown cost basis) is tagged `synthetic` and **excluded from `realized_pnl`** (logged separately). The ledger — the whole measurement instrument — can't invent profit.
+- **R2 — the loud exit must be heard.** A guard trip writes a `price_guard:tripped` ledger row *and* exits non-zero; §12's OS-cron wrapper + read-only reporter surface both (a bare `sys.exit(3)` into a crontab with no MTA is silent otherwise).
+- **R3 — record the tail.** The guard-trip path now writes a marked-NAV snapshot flagged `price_guard:tripped` — a >35% move is exactly the event to capture, not the one blank row.
+- **Minor — partial sells.** Resting-sell adoption compares quantity and logs a WARNING on partial coverage (full partial-fill handling remains a documented limitation).
+
 ## 12. Re-arm sequence (gated on review + owner go)
-Patched file → new sha (both hashes, deployed vs published) → dry-run cycles **incl. a forced guard trip and a kill-mid-sell-place fault-injection** → install OS `crontab`, confirm the agent-turn cron is dead → confirm exactly one process fires → `ARMED=True`.
+1. Patched file → new sha; verify **deployed == published** via the two-command check (§1).
+2. Install **OS `crontab`** (`30 6-12 * * 1-5`) running a wrapper that captures **exit code + stderr**; on non-zero exit OR a new `price_guard:tripped` ledger row, the read-only OpenClaw reporter posts an alert (R2). Confirm the agent-turn cron is dead and **exactly one** process fires per tick.
+3. Dry-run incl. a **forced guard trip** and a **kill-mid-sell-place**, fault-injected against a **single rung** and **verified by querying the broker directly**, not the script's own state file (the script's self-account is the thing under test).
+4. `ARMED=True`.
 
 ---
 *Reference implementation of the Decisive Investor block ladder; retained as the honest control arm. Backtest verdict: DISQUALIFIED-as-designed (volatility-harvesting martingale — many small wins hiding an open-ended tail). Aaron's July statement (−57% SOXL: +$23.5k realized / −$77.6k unrealized ≈ −$54k) is the real-money confirmation.*

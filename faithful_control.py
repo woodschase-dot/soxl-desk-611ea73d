@@ -175,6 +175,13 @@ def run():
             log(f"=== FAITHFUL SOXL CONTROL v3 [{mode}] {now()} === ⚠️ PRICE GUARD TRIPPED: "
                 f"px={px} vs last_accepted={last_px} (>{PRICE_GUARD:.0%} jump/invalid). "
                 f"NO orders this cycle; awaiting a confirming quote.")
+            if LIVE:                                     # R3: the tail event is exactly what to record — write a flagged snapshot
+                p = get_position(); mv = float(p["market_value"]) if p else 0.0
+                upnl = float(p["unrealized_pl"]) if p else 0.0
+                gsnap = {"ts": now(), "mode": mode, "price": px, "price_guard": "tripped",
+                         "marked_nav": cash + mv, "cash": cash, "position_mv": mv,
+                         "unrealized_pnl": upnl, "last_px": last_px}
+                with open(LEDGER, "a") as f: f.write(json.dumps(gsnap) + "\n")   # durable signal the reporter watches (R2)
             return {"ts": now(), "mode": mode, "price": px, "price_guard": "tripped", "last_px": last_px}
         log(f"  PRICE GUARD released: {px:.2f} confirmed by two consecutive quotes (was suspect {guard_px}).")
     st["last_px"] = px; st["guard_px"] = None
@@ -198,18 +205,22 @@ def run():
                         "status": "pending_buy", "buy_id": o["id"], "sell_id": None, "buy_fill": None}
                     log(f"  [RECONCILE] adopted orphan BUY {o['qty']} @ {lp:.2f}")
                 else:                                    # sell
-                    broker_sells[lp] = o["id"]
+                    sq = int(float(o["qty"]))
+                    broker_sells[lp] = {"id": o["id"], "qty": sq}     # store qty too (partial-coverage check)
                     if o["id"] in known: continue
                     m = next((b for b in blocks.values()
                               if round(b.get("target", 0), 2) == lp and b["status"] in ("held", "pending_sell")), None)
                     if m:
                         m["sell_id"] = o["id"]; m["status"] = "pending_sell"
-                        log(f"  [RECONCILE] adopted orphan SELL {o['qty']} @ {lp:.2f} -> block")
-                    else:                                # sell with no block -> track it so the shares aren't orphaned
+                        if sq < m["shares"]:
+                            log(f"  [RECONCILE] WARNING partial sell coverage @ {lp:.2f}: resting {sq} < block {m['shares']} sh ({m['shares']-sq} uncovered)")
+                        else:
+                            log(f"  [RECONCILE] adopted orphan SELL {sq} @ {lp:.2f} -> block")
+                    else:                                # sell with no block -> track it, but DO NOT invent a cost basis (R1)
                         blocks[f"osell-{o['id'][:8]}"] = {"level": None, "buy": round(lp / (1 + SPACING), 2),
-                            "target": lp, "shares": int(float(o["qty"])), "status": "pending_sell",
-                            "buy_id": None, "sell_id": o["id"], "buy_fill": None}
-                        log(f"  [RECONCILE] adopted orphan SELL {o['qty']} @ {lp:.2f} (synthesized tracked block)")
+                            "target": lp, "shares": sq, "status": "pending_sell",
+                            "buy_id": None, "sell_id": o["id"], "buy_fill": None, "synthetic": True}
+                        log(f"  [RECONCILE] adopted orphan SELL {sq} @ {lp:.2f} (SYNTHETIC — excluded from realized P&L)")
 
         # 1) reconcile block lifecycle (fills -> sells -> realized) --------------------
         for key, b in list(blocks.items()):
@@ -222,15 +233,21 @@ def run():
             if b["status"] == "held":                    # arm the rung-pegged conditional sell
                 tgt = round(b["target"], 2)
                 if LIVE and tgt in broker_sells:         # D1: a sell already rests here -> adopt, never double-place
-                    b["sell_id"] = broker_sells[tgt]
-                    log(f"  [RECONCILE] sell already resting @ {tgt:.2f}; adopted (no double-place)")
+                    b["sell_id"] = broker_sells[tgt]["id"]
+                    if broker_sells[tgt]["qty"] < b["shares"]:
+                        log(f"  [RECONCILE] WARNING partial sell @ {tgt:.2f}: resting {broker_sells[tgt]['qty']} < block {b['shares']} sh")
+                    else:
+                        log(f"  [RECONCILE] sell already resting @ {tgt:.2f}; adopted (no double-place)")
                 else:
                     b["sell_id"] = place_limit("sell", b["shares"], tgt)
                 b["status"] = "pending_sell"; save_state(st)
             if b["status"] == "pending_sell" and LIVE:
                 o = get_order(b["sell_id"])
                 if o and o.get("status") == "filled":
-                    st["realized_pnl"] += b["shares"] * (float(o["filled_avg_price"]) - (b["buy_fill"] or b["buy"]))
+                    if b.get("synthetic"):               # R1: unknown cost basis -> never fabricate realized P&L
+                        log(f"  [SYNTHETIC] adopted sell filled @ {o.get('filled_avg_price')} — NOT booked to realized (no true cost basis)")
+                    else:
+                        st["realized_pnl"] += b["shares"] * (float(o["filled_avg_price"]) - (b["buy_fill"] or b["buy"]))
                     del blocks[key]
 
         # 2) anchor the fixed lattice (set once; re-anchor only when fully flat) -------
