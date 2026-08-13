@@ -116,7 +116,29 @@ All four found by adversarial code review; fixed in sha `5051cc85`, dry-run + un
 4. `ARMED=True`.
 
 ## 13. Reconcile test harness (deterministic)
-`test_reconcile.py` runs the real `run()` logic against a fake in-memory broker + temp state — 5 cases, each engineered so it **cannot pass without exercising the branch it names**: **D1** (adopt already-resting sell → no double), **R1/N1** (no block → synthetic `buy=None`, buy ladder unaffected), **N2** (guard-trip `exposure_pct`/`current_drawdown_pct` arithmetic validated *with* inventory), **D2** (cancel fails because order FILLED mid-cycle → promote to `held`, sell next cycle), **D2b** (cancel fails but order STILL OPEN → block untouched, retried, nothing double-placed). All pass.
+`test_reconcile.py` runs the real `run()` logic against a fake broker stubbed **at the lowest layer** — `_req(method, url, body)` — so everything above it executes real code: `cancel()`'s try/except contract, `place_limit()`'s `o["id"]` extraction, `list_open_orders()`'s `or []`, `get_position()`'s 404→None, and the 204/empty-body handling. The only fake is the HTTP round-trip, which makes the v2 204/empty-body DELETE class **reachable inside the harness** rather than stubbed past.
+
+**10 cases, each engineered so it cannot pass without exercising the branch it names:**
+- **D1** — step-0 adopt: `held` block whose sell already rests (crash: placed, unsaved) → adopt, no double.
+- **D1b** — step-1 guard: `held` block whose `sell_id` is already known → adopt via `tgt in broker_sells`, no 2nd sell.
+- **R1N1** — resting sell, no block → synthetic `buy=None`, real buy ladder (5 rungs) unaffected.
+- **R1F** — synthetic sell **FILLS** → `realized_pnl` stays `0.00` (the actual R1 fix: no fabricated P&L at fill time).
+- **R1C** — control: a real block's sell fills → `realized_pnl` books the **true** amount (16×(133.12−130.00)=49.92).
+- **N2** — guard trip **with** inventory → `exposure_pct`/`current_drawdown_pct` validated against independently-computed constants (2.3590 / −6.8945), not the code's own output.
+- **D3** — guard trips on a suspect quote, then **RELEASES** on the confirming second quote (no latch), ladder resumes.
+- **PART** — resting sell covers fewer shares than the block → partial-coverage **WARNING** + adopt.
+- **D2** — cancel fails because order **FILLED** mid-cycle → promote to `held` (branch log asserted), sell next cycle.
+- **D2b** — cancel fails, order **STILL OPEN** → block untouched (`shares`/`buy_fill` unchanged), retried, nothing double-placed.
+
+**Anti-vacuity red/green (`redgreen.sh`, gap 3):** every case is also run against the builds predating its fix. Each case goes **red on exactly the build before its own fix** and green once it lands; the **R1C control is green on all builds by design** (real-P&L booking was never broken — that's what isolates R1F's `0.00` as deliberate suppression, not a dead path). No case passes without its branch present.
+
+| case | pre-D1D4 `a7065c3` | pre-R1 `3b4f376` | pre-N1 `fefd212` | reviewed `a388aef` | armed `2ab7fd56` |
+|---|---|---|---|---|---|
+| D1 / D1b / D3 / D2 / D2b | FAIL | PASS | PASS | PASS | PASS |
+| R1F / PART | FAIL | FAIL | PASS | PASS | PASS |
+| R1N1 / N2 | FAIL | FAIL | FAIL | PASS | PASS |
+| R1C (control) | PASS | PASS | PASS | PASS | PASS |
+
 > **Scope (verbatim):** the mock proves the reconcile **logic** is correct; it does **not** prove real-Alpaca behavior on that path. The v2 204/empty-body DELETE bug is the standing proof that gap is real — invisible to everything except a live DELETE. Real-API confirmation of D1/D2 comes **organically on the first natural fill**, verified broker-direct.
 
 ---
