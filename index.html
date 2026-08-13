@@ -39,16 +39,16 @@
 </style></head><body><div class="wrap">
   <div class="bar">
     <div><h1>DI SOXL Control — Paper Account</h1>
-      <div class="muted">PA3OU2TOQR1N · SOXL $149.38 · generated 2026-08-13 07:15 PDT</div></div>
+      <div class="muted">PA3OU2TOQR1N · SOXL $149.25 · generated 2026-08-13 07:21 PDT</div></div>
     <div><span class="pill warn">ARMED — placing paper orders</span></div>
   </div>
 
-  <div class="card hero"><div><div class="muted">SOXL — live</div><div class="price">$149.38</div></div>
+  <div class="card hero"><div><div class="muted">SOXL — <span id="qsrc">snapshot</span></div><div class="price" id="px">$149.25</div></div>
     <div class="tag">anchored grid from $148.68 · rungs every 2.4% · holds 5 buys below price</div></div>
 
   <div class="grid-tiles"><div class="tile"><div class="label">Marked NAV</div><div class="val ">$100,233.02</div><div class="sub">cash + positions, incl. unrealized</div></div><div class="tile"><div class="label">vs inception</div><div class="val pos">+0.29%</div><div class="sub">from $99,938.86</div></div><div class="tile"><div class="label">Exposure</div><div class="val ">0.0%</div><div class="sub">invested / marked NAV</div></div><div class="tile"><div class="label">Current drawdown</div><div class="val ">0.00%</div><div class="sub">off marked-NAV peak</div></div><div class="tile"><div class="label">Max drawdown</div><div class="val ">0.00%</div><div class="sub">exposure there: 0%  ← kill metric</div></div><div class="tile"><div class="label">Cash</div><div class="val ">$100,233.02</div></div><div class="tile"><div class="label">Realized P&L</div><div class="val pos">$0.00</div><div class="sub">closed round-trips</div></div><div class="tile"><div class="label">Unrealized P&L</div><div class="val pos">$0.00</div><div class="sub">mark-to-market on open blocks</div></div></div>
 
-  <div class="card"><h2>Projected buys as SOXL rises</h2><table><thead><tr><th class="r">Buy @</th><th class="r">SOXL must rise</th><th class="r">Est. shares</th><th class="r">Sell target</th></tr></thead><tbody><tr><td class="r">$152.25</td><td class="r pos">+1.9%</td><td class="r">16</td><td class="r">$155.90</td></tr><tr><td class="r">$155.90</td><td class="r pos">+4.4%</td><td class="r">16</td><td class="r">$159.64</td></tr><tr><td class="r">$159.64</td><td class="r pos">+6.9%</td><td class="r">15</td><td class="r">$163.47</td></tr><tr><td class="r">$163.48</td><td class="r pos">+9.4%</td><td class="r">15</td><td class="r">$167.40</td></tr><tr><td class="r">$167.40</td><td class="r pos">+12.1%</td><td class="r">14</td><td class="r">$171.42</td></tr><tr><td class="r">$171.42</td><td class="r pos">+14.8%</td><td class="r">14</td><td class="r">$175.53</td></tr><tr><td class="r">$175.53</td><td class="r pos">+17.5%</td><td class="r">14</td><td class="r">$179.74</td></tr><tr><td class="r">$179.74</td><td class="r pos">+20.3%</td><td class="r">13</td><td class="r">$184.05</td></tr></tbody></table>
+  <div class="card"><h2>Projected buys as SOXL rises</h2><table><thead><tr><th class="r">Buy @</th><th class="r">SOXL must rise</th><th class="r">Est. shares</th><th class="r">Sell target</th></tr></thead><tbody id="projbody"><tr><td class="r">$152.25</td><td class="r pos">+2.0%</td><td class="r">16</td><td class="r">$155.90</td></tr><tr><td class="r">$155.90</td><td class="r pos">+4.5%</td><td class="r">16</td><td class="r">$159.64</td></tr><tr><td class="r">$159.64</td><td class="r pos">+7.0%</td><td class="r">15</td><td class="r">$163.47</td></tr><tr><td class="r">$163.48</td><td class="r pos">+9.5%</td><td class="r">15</td><td class="r">$167.40</td></tr><tr><td class="r">$167.40</td><td class="r pos">+12.2%</td><td class="r">14</td><td class="r">$171.42</td></tr><tr><td class="r">$171.42</td><td class="r pos">+14.9%</td><td class="r">14</td><td class="r">$175.53</td></tr><tr><td class="r">$175.53</td><td class="r pos">+17.6%</td><td class="r">14</td><td class="r">$179.74</td></tr><tr><td class="r">$179.74</td><td class="r pos">+20.4%</td><td class="r">13</td><td class="r">$184.05</td></tr></tbody></table>
     <div class="note">The grid is a <b>fixed lattice</b> anchored at $148.68 (rungs every 2.4%). As SOXL climbs past each level below, that buy is placed automatically and the ladder re-centers up — so these are the next resting buys in line. Est. shares assume current cash; sell target = buy × 1.024.</div></div>
 
   <div class="card"><h2>Marked NAV (tail-first)</h2><div class="empty">Not enough ledger history yet to chart. The NAV/drawdown curve fills in once the control logs armed cycles.</div>
@@ -60,5 +60,34 @@
 
   <div class="note">Read-only view · paper account only · this page places no orders.
   The strategy is a volatility-harvesting martingale (no stop, exposure can reach 100%); the number
-  that matters is max drawdown and exposure at that drawdown — not the realized win rate.</div>
-</div></body></html>
+  that matters is max drawdown and exposure at that drawdown — not the realized win rate.
+  Live price + projected ladder update every ~20s from a public quote feed; account tiles refresh hourly.</div>
+</div>
+<script>
+const GRID={"anchor": 148.68, "spacing": 0.024, "blockPct": 0.025, "cash": 100233.02, "projectUp": 8};
+const CNBC='https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol?symbols=SOXL&requestMethod=itv&noform=1&partnerId=2&fund=1&exthrs=1&output=json';
+function money(x){return '$'+x.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});}
+function proj(px){
+  const s=GRID.spacing,a=GRID.anchor; if(!a||!px)return;
+  const lat=n=>Math.round(a*Math.pow(1+s,n)*100)/100;
+  let n0=Math.floor(Math.log(px/a)/Math.log(1+s))+1; while(lat(n0)<=px)n0++;
+  let rows='';
+  for(let k=0;k<GRID.projectUp;k++){const L=lat(n0+k);const sh=Math.floor(GRID.blockPct*GRID.cash/L);
+    const tgt=Math.round(L*(1+s)*100)/100;const rise=((L/px-1)*100).toFixed(1);
+    rows+='<tr><td class="r">'+money(L)+'</td><td class="r pos">+'+rise+'%</td><td class="r">'+sh+'</td><td class="r">'+money(tgt)+'</td></tr>';}
+  const b=document.getElementById('projbody'); if(b)b.innerHTML=rows;
+}
+async function tick(){
+  try{
+    const r=await fetch(CNBC,{cache:'no-store'}); const j=await r.json();
+    const q=j.FormattedQuoteResult.FormattedQuote[0]; const px=parseFloat(q.last);
+    if(!isFinite(px))throw 0;
+    document.getElementById('px').textContent=money(px);
+    const t=(q.last_time||'').replace('T',' ').slice(0,19);
+    document.getElementById('qsrc').textContent='live · CNBC'+(t?' '+t:'');
+    proj(px);
+  }catch(e){const el=document.getElementById('qsrc'); if(el)el.textContent='snapshot (live quote unavailable)';}
+}
+tick(); setInterval(tick,20000);
+</script>
+</body></html>
