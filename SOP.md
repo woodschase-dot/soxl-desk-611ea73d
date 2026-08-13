@@ -20,7 +20,7 @@ Real orders are placed **only if BOTH** are true:
 1. **File gate:** `ARMED = True` (single literal in the config block).
 2. **Env gate:** `FAITHFUL_EXECUTION_ENABLED=true` in the process environment (set inside the cron command, not in `env.json`).
 
-`LIVE = (env == "true") and ARMED`. Default (either gate off) = **DRY-RUN**: logs intended orders, places nothing, never writes state. Disarm = flip `ARMED=False` **or** remove the env var; resting orders can then be cancelled on request. Credentials read from `~/.openclaw/config/env.json` (`APCA_API_KEY_ID`, `APCA_API_SECRET_KEY`).
+`LIVE = (env == "true") and ARMED`. Default (either gate off) = **DRY-RUN**: logs intended orders, places nothing, never writes state. Disarm = flip `ARMED=False` **or** remove the env var; resting orders can then be cancelled on request. Credentials (the standard Alpaca paper key-id + secret) are read at runtime from `~/.openclaw/config/env.json` and never appear in this file, the code output, or any published artifact.
 
 ## 3. Strategy rules (faithful to the patent + Aaron's statement)
 | Parameter | Value | Source |
