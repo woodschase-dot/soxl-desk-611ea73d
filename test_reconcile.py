@@ -365,20 +365,38 @@ def invariant():
     import math
     fresh(); B.px = 151.0
     N = 300
-    max_pend = 0; max_open = 0; worst = None
+    max_pend = 0; worst = None
+    def on_lattice(anchor, price):
+        if not anchor or price <= 0:
+            return False
+        n = round(math.log(price / anchor) / math.log(1.0 + fc.SPACING))
+        return abs(round(anchor * (1.0 + fc.SPACING) ** n, 2) - price) < 0.005
     for i in range(N):
         B.px = round(146.0 + 15.0 * math.sin(i / 9.0) + 6.0 * math.sin(i / 2.3), 2)
         B.apply_fills()                         # market crosses resting orders -> fills before the cycle
         run_capture()
-        st = json.load(open(fc.STATE))
+        st = json.load(open(fc.STATE)); anchor = st.get("anchor")
         pend = sum(1 for b in st["blocks"].values() if b["status"] == "pending_buy")
-        obuys = len(buys())
-        max_pend = max(max_pend, pend); max_open = max(max_open, obuys)
-        if pend > fc.WINDOW_RUNGS or obuys > fc.WINDOW_RUNGS:
-            worst = (i, B.px, pend, obuys); break
-    ok = worst is None and max_pend <= fc.WINDOW_RUNGS and max_open <= fc.WINDOW_RUNGS
-    detail = (f"{N} cycles: max pending_buy={max_pend}, max open buys={max_open} (cap {fc.WINDOW_RUNGS})"
-              if ok else f"VIOLATION cycle {worst[0]} px={worst[1]}: pending={worst[2]} open_buys={worst[3]}")
+        ob = buys()
+        committed = sum(int(float(o["qty"])) * float(o["limit_price"]) for o in ob)
+        off = [float(o["limit_price"]) for o in ob if not on_lattice(anchor, float(o["limit_price"]))]
+        max_pend = max(max_pend, pend)
+        bad = None
+        if pend > fc.WINDOW_RUNGS or len(ob) > fc.WINDOW_RUNGS:
+            bad = f"count>cap pending={pend} open={len(ob)}"
+        elif off:                               # churn-without-stacking: cancel+replace at drifted prices
+            bad = f"off-lattice buys {off} vs anchor {anchor}"
+        elif committed > B.cash + 1e-6:         # never commit more than cash on hand
+            bad = f"committed {committed:.2f} > cash {B.cash:.2f}"
+        elif B.pos < 0:                         # never short (the direct consequence of a D1 double-sell)
+            bad = f"SHORT pos={B.pos}"
+        if bad:
+            worst = (i, B.px, bad); break
+    ok = worst is None and max_pend == fc.WINDOW_RUNGS   # bound must be REACHED, not merely respected
+    detail = (f"{N} cycles: max pending_buy={max_pend} (cap {fc.WINDOW_RUNGS}, bound reached); "
+              f"all open buys on-lattice, committed<=cash, pos>=0 every cycle"
+              if ok else f"VIOLATION cycle {worst[0]} px={worst[1]}: {worst[2]}"
+                         if worst else f"bound never reached (max_pend={max_pend})")
     return ok, detail
 
 
