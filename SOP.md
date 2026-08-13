@@ -118,26 +118,32 @@ All four found by adversarial code review; fixed in sha `5051cc85`, dry-run + un
 ## 13. Reconcile test harness (deterministic)
 `test_reconcile.py` runs the real `run()` logic against a fake broker stubbed **at the lowest layer** — `_req(method, url, body)` — so everything above it executes real code: `cancel()`'s try/except contract, `place_limit()`'s `o["id"]` extraction, `list_open_orders()`'s `or []`, `get_position()`'s 404→None, and the 204/empty-body handling. The only fake is the HTTP round-trip, which makes the v2 204/empty-body DELETE class **reachable inside the harness** rather than stubbed past.
 
-**10 cases, each engineered so it cannot pass without exercising the branch it names:**
+Two fake layers, on purpose: **most cases stub `_req`** (the HTTP round-trip) so the reconcile logic above it runs real; the **REQ case stubs `urlopen` one layer lower** so `_req`'s *own* empty-body/204 parse runs — that is the v2 `json.loads('')` site, which an `_req`-level fake would skip.
+
+**12 cases, each engineered so it cannot pass without exercising the branch it names:**
 - **D1** — step-0 adopt: `held` block whose sell already rests (crash: placed, unsaved) → adopt, no double.
 - **D1b** — step-1 guard: `held` block whose `sell_id` is already known → adopt via `tgt in broker_sells`, no 2nd sell.
 - **R1N1** — resting sell, no block → synthetic `buy=None`, real buy ladder (5 rungs) unaffected.
 - **R1F** — synthetic sell **FILLS** → `realized_pnl` stays `0.00` (the actual R1 fix: no fabricated P&L at fill time).
 - **R1C** — control: a real block's sell fills → `realized_pnl` books the **true** amount (16×(133.12−130.00)=49.92).
 - **N2** — guard trip **with** inventory → `exposure_pct`/`current_drawdown_pct` validated against independently-computed constants (2.3590 / −6.8945), not the code's own output.
-- **D3** — guard trips on a suspect quote, then **RELEASES** on the confirming second quote (no latch), ladder resumes.
+- **D3** — **two cycles, no pre-seeded `guard_px`**: cycle 1 must *write* `guard_px` on trip; cycle 2 reads it to **RELEASE** (no latch), ladder resumes. A broken trip-write can't pass because nothing supplies the value.
 - **PART** — resting sell covers fewer shares than the block → partial-coverage **WARNING** + adopt.
 - **D2** — cancel fails because order **FILLED** mid-cycle → promote to `held` (branch log asserted), sell next cycle.
 - **D2b** — cancel fails, order **STILL OPEN** → block untouched (`shares`/`buy_fill` unchanged), retried, nothing double-placed.
+- **REQ** — `urlopen`-stubbed: `_req`'s own `204`/empty-body → `None` (not a `json.loads('')` crash), real body → parsed. The v2 DELETE bug's exact site.
+- **INV** — **multi-cycle random walk (300 cycles, with fills)**: asserts pending buys ≤ `WINDOW_RUNGS` on **every** cycle. This is the invariant whose breach *was* the v2 29-order runaway; single-cycle branch tests can't see it.
 
-**Anti-vacuity red/green (`redgreen.sh`, gap 3):** every case is also run against the builds predating its fix. Each case goes **red on exactly the build before its own fix** and green once it lands; the **R1C control is green on all builds by design** (real-P&L booking was never broken — that's what isolates R1F's `0.00` as deliberate suppression, not a dead path). No case passes without its branch present.
+**Anti-vacuity red/green (`redgreen.sh`):** each case is run against the builds predating its fix.
 
 | case | pre-D1D4 `a7065c3` | pre-R1 `3b4f376` | pre-N1 `fefd212` | reviewed `a388aef` | armed `2ab7fd56` |
 |---|---|---|---|---|---|
 | D1 / D1b / D3 / D2 / D2b | FAIL | PASS | PASS | PASS | PASS |
 | R1F / PART | FAIL | FAIL | PASS | PASS | PASS |
 | R1N1 / N2 | FAIL | FAIL | FAIL | PASS | PASS |
-| R1C (control) | PASS | PASS | PASS | PASS | PASS |
+| R1C · REQ · INV | PASS | PASS | PASS | PASS | PASS |
+
+D1..D2b go **red on exactly the build before their own fix** → no case passes without its branch present. **R1C/REQ/INV are green on all captured builds by design, not vacuously:** R1C is a control (real-P&L booking was never broken; it isolates R1F's 0.00 as deliberate suppression); REQ/INV guard fixes that *predate* `a7065c3` (the 204-body parse and the anchored-lattice dedup), so no captured build is red on them. Their non-vacuity is proven by **sabotage** instead: strip `_req`'s 204 guard → REQ **FAILs** (`json.loads('')` crash); disable `open_prices` dedup → INV **FAILs at cycle 1 with 8 open buys** — the exact v2 stacking.
 
 > **Scope (verbatim):** the mock proves the reconcile **logic** is correct; it does **not** prove real-Alpaca behavior on that path. The v2 204/empty-body DELETE bug is the standing proof that gap is real — invisible to everything except a live DELETE. Real-API confirmation of D1/D2 comes **organically on the first natural fill**, verified broker-direct.
 

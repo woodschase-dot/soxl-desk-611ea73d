@@ -8,7 +8,7 @@
 set -u
 DIR="/Users/claw/.openclaw/workspace/trading/strategy_lab/soxl-block"
 PUB="$DIR/publish"
-IDS="D1 D1b R1N1 R1F R1C N2 D3 PART D2 D2b"
+IDS="D1 D1b R1N1 R1F R1C N2 D3 PART D2 D2b REQ INV"
 REFS="a7065c3 3b4f376 fefd212 a388aef CURRENT"
 label() { case "$1" in
   a7065c3) echo "pre-D1D4";; 3b4f376) echo "pre-R1";; fefd212) echo "pre-N1";;

@@ -2,12 +2,17 @@
 """
 Deterministic reconcile tests for faithful_control.py.
 
-HOW IT'S WIRED (reviewer gap 2): the fake broker is stubbed at the LOWEST layer —
-fc._req(method, url, body). Everything above it runs the REAL code: cancel()'s
-try/except contract, place_limit()'s o["id"] extraction, list_open_orders()'s
-`or []`, get_position()'s 404->None, and the 204/empty-body handling in _req's
-callers. The only thing faked is the HTTP round-trip itself. This makes the v2
-204/empty-body DELETE class reachable inside the harness instead of stubbed past.
+HOW IT'S WIRED: two fake layers, on purpose.
+  * MOST cases stub fc._req(method, url, body) — the fake IS the HTTP round-trip.
+    Everything above runs REAL code: cancel()'s try/except, place_limit()'s
+    o["id"], list_open_orders()'s `or []`, get_position()'s 404->None, and the
+    callers' handling of a None return. This is the reconcile-LOGIC layer.
+  * The REQ case stubs urllib.request.urlopen ONE layer lower, so the REAL _req
+    body-parse executes — `raw = resp.read()...; if status==204 or not raw:
+    return None; return json.loads(raw)`. That is the exact v2 site (json.load on
+    an empty DELETE body). Stubbing _req would skip it; stubbing urlopen reaches
+    it. (Reviewer finding 2: the _req-level fake covers callers of _req, NOT _req
+    itself — REQ closes that.)
 
 SCOPE (recorded verbatim, per reviewer): this harness proves the reconcile LOGIC
 is correct against a broker that behaves as documented. It does NOT prove real-
@@ -26,16 +31,26 @@ is not testing its branch. Regenerate with ./redgreen.sh. Result (2026-08-13):
   D1b     FAIL      PASS     PASS     PASS      PASS
   R1N1    FAIL      FAIL     FAIL     PASS      PASS
   R1F     FAIL      FAIL     PASS     PASS      PASS
-  R1C     PASS      PASS     PASS     PASS      PASS   <- CONTROL: books real P&L on
-  N2      FAIL      FAIL     FAIL     PASS      PASS      every build (never broken);
-  D3      FAIL      PASS     PASS     PASS      PASS      isolates R1F's 0.00 as a
-  PART    FAIL      FAIL     PASS     PASS      PASS      deliberate suppression, not
-  D2      FAIL      PASS     PASS     PASS      PASS      a dead path.
+  R1C     PASS      PASS     PASS     PASS      PASS   <- CONTROL (see note)
+  N2      FAIL      FAIL     FAIL     PASS      PASS
+  D3      FAIL      PASS     PASS     PASS      PASS
+  PART    FAIL      FAIL     PASS     PASS      PASS
+  D2      FAIL      PASS     PASS     PASS      PASS
   D2b     FAIL      PASS     PASS     PASS      PASS
+  REQ     PASS      PASS     PASS     PASS      PASS   <- GUARD (see note)
+  INV     PASS      PASS     PASS     PASS      PASS   <- GUARD (see note)
   builds: a7065c3(32957e44) 3b4f376(5051cc85) fefd212(7e88f915) a388aef(e588e613) armed(2ab7fd56)
 
-  Every case except the R1C control goes red on exactly the build predating its
-  own fix and green once the fix lands. No case passes without its branch present.
+  D1..D2b each go red on exactly the build predating their own fix and green once it
+  lands -> no case passes without its branch present.
+  R1C/REQ/INV are green on ALL captured builds by design, NOT vacuously:
+    - R1C is a control: real-P&L booking was never broken; it isolates R1F's 0.00
+      as deliberate suppression rather than a dead path.
+    - REQ/INV guard fixes that PREDATE a7065c3 (the 204/empty-body parse and the
+      anchored-lattice dedup), so no captured build is red on them. Non-vacuity is
+      proven by sabotage instead: remove _req's 204 guard -> REQ FAILs (json.loads('')
+      crash); disable open_prices dedup -> INV FAILs at cycle 1 with 8 open buys (the
+      exact v2 29-order stacking). Both sabotage runs are reproducible on a temp copy.
 
 Cases (id -> branch it must exercise):
   D1    step-0 adopt: held block whose sell already rests (crash: placed, unsaved)
@@ -44,13 +59,19 @@ Cases (id -> branch it must exercise):
   R1F   synthetic sell FILLS -> realized_pnl stays 0.0, block removed (the actual R1 fix)
   R1C   real block's sell FILLS -> realized_pnl books the TRUE amount (control for R1F)
   N2    guard trip WITH inventory -> exposure/drawdown computed non-zero (arithmetic)
-  D3    guard trip then confirming quote -> RELEASE, no latch, ladder resumes
+  D3    TWO cycles: trip path must WRITE guard_px (c1), release path reads it (c2).
+        No pre-seeded guard_px, so a broken trip-write cannot pass (reviewer finding 1).
   PART  resting sell covers fewer shares than the block -> partial-coverage WARNING
   D2    cancel fails because order FILLED mid-cycle -> promote to held, sell next cycle
   D2b   cancel fails, order STILL OPEN -> block untouched, retried, nothing double-placed
+  REQ   urlopen-level: _req's OWN empty-body/204 branch (the v2 json.load('') site)
+  INV   multi-cycle random walk: pending buys <= WINDOW_RUNGS on EVERY cycle. This is
+        the invariant that would have caught the v2 29-order runaway (reviewer finding 3).
 """
 import io, json, os, sys, contextlib, tempfile
 import faithful_control as fc
+
+_REAL_REQ = fc._req      # capture the genuine _req (urlopen-backed) before any case fakes it
 
 
 class FakeBroker:
@@ -79,6 +100,20 @@ class FakeBroker:
 
     def _open(self):
         return [dict(o) for o in self.orders.values() if o["status"] in ("new", "accepted")]
+
+    def apply_fills(self):
+        """Market moved to self.px: fill resting BUYs at/below their limit, resting
+        SELLs at/above. Keeps cash/pos self-consistent so the multi-cycle sim is honest."""
+        for o in self.orders.values():
+            if o["status"] not in ("new", "accepted"):
+                continue
+            lp = float(o["limit_price"]); q = int(float(o["qty"]))
+            if o["side"] == "buy" and self.px <= lp:
+                o["status"] = "filled"; o["filled_avg_price"] = f"{lp:.2f}"
+                self.pos += q; self.cash -= q * lp
+            elif o["side"] == "sell" and self.px >= lp:
+                o["status"] = "filled"; o["filled_avg_price"] = f"{lp:.2f}"
+                self.pos -= q; self.cash += q * lp
 
     def req(self, method, url, body=None):
         S = fc.SYMBOL
@@ -228,15 +263,26 @@ def n2():
     return ok, f"exposure={row['exposure_pct']:.4f}(={exp:.4f}) dd={row['current_drawdown_pct']:.4f}(={dd:.4f})"
 
 def d3():
-    """Guard trips on a suspect quote, then RELEASES on the confirming second quote (no latch)."""
-    fresh(); B.pos = 0; B.px = 91.0
-    put({"anchor": 150.0, "last_px": 150.0, "guard_px": 90.0, "realized_pnl": 0.0,
-         "equity_peak": None, "blocks": {}})   # 91 vs 150 = 39% jump (trips), but 91 vs guard 90 = 1% (confirms)
-    _, text = run_capture()
-    s = json.load(open(fc.STATE))
-    released = "PRICE GUARD released" in text
-    ok = released and s.get("guard_px") is None and abs((s.get("last_px") or 0) - 91.0) < 1e-9 and len(buys()) == 5
-    return ok, f"released={released} guard_px_cleared={s.get('guard_px') is None} last_px={s.get('last_px')} buys={len(buys())} (5)"
+    """TWO cycles, no pre-seeded guard_px (reviewer finding 1): the TRIP path must WRITE
+    guard_px in cycle 1; the RELEASE path reads it in cycle 2. If the trip-write were broken
+    this fails, because nothing supplies the value the code is supposed to produce."""
+    fresh(); B.pos = 0
+    put({"anchor": 150.0, "last_px": 150.0, "realized_pnl": 0.0,
+         "equity_peak": None, "blocks": {}})   # NB: no guard_px in state
+    B.px = 91.0
+    _, t1 = run_capture()                       # c1: 91 vs 150 = 39% jump, guard_px None -> TRIP, must WRITE guard_px=91
+    s1 = json.load(open(fc.STATE))
+    tripped = "PRICE GUARD TRIPPED" in t1
+    wrote_guard = abs((s1.get("guard_px") or 0) - 91.0) < 1e-9
+    no_ladder_yet = len(buys()) == 0
+    _, t2 = run_capture()                       # c2: 91 confirmed by the guard_px the code wrote -> RELEASE
+    s2 = json.load(open(fc.STATE))
+    released = "PRICE GUARD released" in t2
+    cleared = s2.get("guard_px") is None and abs((s2.get("last_px") or 0) - 91.0) < 1e-9
+    resumed = len(buys()) == 5
+    ok = tripped and wrote_guard and no_ladder_yet and released and cleared and resumed
+    return ok, (f"c1[trip={tripped} wrote_guard_px={wrote_guard} no_ladder={no_ladder_yet}] "
+                f"c2[release={released} cleared={cleared} ladder={len(buys())}]")
 
 def partial_qty():
     fresh(); B.pos = 16
@@ -281,6 +327,61 @@ def d2b():
                 f"orders@130={len(at130)} (1) sells={len(sells())} (0)")
 
 
+class FakeResp:
+    """Minimal stand-in for the urllib response object _req uses as a context manager."""
+    def __init__(self, body="", status=200):
+        self._b = body.encode() if isinstance(body, str) else body
+        self.status = status
+    def read(self): return self._b
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+
+def req_empty():
+    """Reviewer finding 2: reach _req's OWN empty-body/204 branch by stubbing urlopen,
+    so the real `if status==204 or not raw: return None; json.loads(raw)` executes.
+    This is the v2 site: a successful DELETE returns an empty body; the pre-fix code
+    did json.loads('') and crashed. Removing that guard makes this case error -> red."""
+    import urllib.request
+    orig = urllib.request.urlopen
+    fc._req = _REAL_REQ          # undo any case's _req fake so the genuine urlopen path runs
+    fc.LIVE = True
+    try:
+        urllib.request.urlopen = lambda r, timeout=30: FakeResp("", status=204)
+        a = fc._req("DELETE", "http://x/v2/orders/o1")      # 204 -> None (no json crash)
+        urllib.request.urlopen = lambda r, timeout=30: FakeResp("", status=200)
+        b = fc._req("DELETE", "http://x/v2/orders/o1")      # empty body, 200 -> None (`not raw`)
+        urllib.request.urlopen = lambda r, timeout=30: FakeResp('{"id":"o9"}', status=200)
+        c = fc._req("GET", "http://x/v2/orders/o9")         # real body -> parsed
+        ok = a is None and b is None and c == {"id": "o9"}
+        return ok, f"204->{a}  empty200->{b}  json->{c}  (real _req body-parse ran)"
+    finally:
+        urllib.request.urlopen = orig
+
+def invariant():
+    """Reviewer finding 3: the test aimed at the actual v2 failure. Drive px through a
+    deterministic wobble spanning ~125..167 (crossing many rungs both ways, with fills)
+    and assert pending buys <= WINDOW_RUNGS on EVERY cycle. The 29-order runaway was a
+    breach of exactly this bound; single-cycle branch tests can't see it."""
+    import math
+    fresh(); B.px = 151.0
+    N = 300
+    max_pend = 0; max_open = 0; worst = None
+    for i in range(N):
+        B.px = round(146.0 + 15.0 * math.sin(i / 9.0) + 6.0 * math.sin(i / 2.3), 2)
+        B.apply_fills()                         # market crosses resting orders -> fills before the cycle
+        run_capture()
+        st = json.load(open(fc.STATE))
+        pend = sum(1 for b in st["blocks"].values() if b["status"] == "pending_buy")
+        obuys = len(buys())
+        max_pend = max(max_pend, pend); max_open = max(max_open, obuys)
+        if pend > fc.WINDOW_RUNGS or obuys > fc.WINDOW_RUNGS:
+            worst = (i, B.px, pend, obuys); break
+    ok = worst is None and max_pend <= fc.WINDOW_RUNGS and max_open <= fc.WINDOW_RUNGS
+    detail = (f"{N} cycles: max pending_buy={max_pend}, max open buys={max_open} (cap {fc.WINDOW_RUNGS})"
+              if ok else f"VIOLATION cycle {worst[0]} px={worst[1]}: pending={worst[2]} open_buys={worst[3]}")
+    return ok, detail
+
+
 CASES = [
     ("D1",   "step-0 adopt resting sell (crash, unsaved)",          d1),
     ("D1b",  "step-1 guard: sell_id known -> no 2nd sell",          d1b),
@@ -292,6 +393,8 @@ CASES = [
     ("PART", "partial-qty sell coverage warns + adopts",            partial_qty),
     ("D2",   "cancel-fails-FILLED -> held, sell next cycle",        d2),
     ("D2b",  "cancel-fails-OPEN -> block untouched, no double",     d2b),
+    ("REQ",  "_req OWN empty-body/204 branch (v2 json crash site)", req_empty),
+    ("INV",  "multi-cycle: pending buys <= WINDOW_RUNGS every cycle", invariant),
 ]
 
 if __name__ == "__main__":
