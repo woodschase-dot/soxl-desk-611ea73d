@@ -115,5 +115,9 @@ All four found by adversarial code review; fixed in sha `5051cc85`, dry-run + un
 3. Dry-run incl. a **forced guard trip** and a **kill-mid-sell-place**, fault-injected against a **single rung** and **verified by querying the broker directly**, not the script's own state file (the script's self-account is the thing under test).
 4. `ARMED=True`.
 
+## 13. Reconcile test harness (deterministic)
+`test_reconcile.py` runs the real `run()` logic against a fake in-memory broker + temp state — 5 cases, each engineered so it **cannot pass without exercising the branch it names**: **D1** (adopt already-resting sell → no double), **R1/N1** (no block → synthetic `buy=None`, buy ladder unaffected), **N2** (guard-trip `exposure_pct`/`current_drawdown_pct` arithmetic validated *with* inventory), **D2** (cancel fails because order FILLED mid-cycle → promote to `held`, sell next cycle), **D2b** (cancel fails but order STILL OPEN → block untouched, retried, nothing double-placed). All pass.
+> **Scope (verbatim):** the mock proves the reconcile **logic** is correct; it does **not** prove real-Alpaca behavior on that path. The v2 204/empty-body DELETE bug is the standing proof that gap is real — invisible to everything except a live DELETE. Real-API confirmation of D1/D2 comes **organically on the first natural fill**, verified broker-direct.
+
 ---
 *Reference implementation of the Decisive Investor block ladder; retained as the honest control arm. Backtest verdict: DISQUALIFIED-as-designed (volatility-harvesting martingale — many small wins hiding an open-ended tail). Aaron's July statement (−57% SOXL: +$23.5k realized / −$77.6k unrealized ≈ −$54k) is the real-money confirmation.*
