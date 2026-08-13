@@ -8,12 +8,11 @@
 ---
 
 ## 1. Fingerprint (verify these first)
-- **File:** `/Users/claw/.openclaw/workspace/trading/strategy_lab/soxl-block/faithful_control.py`
+- **File:** `trading/strategy_lab/soxl-block/faithful_control.py` (workspace-relative)
 - **sha256:** `039f40b3d2d81fe339048d71a64c0b6c1d6ced4ef85d42012328e5614d36d331`
 - **Dependencies:** Python **stdlib only** (`json, os, sys, re, math, urllib`). No `alpaca-py`, no pandas. Broker I/O hand-rolled over `urllib`.
 - **Endpoint:** hard-coded `BASE = "https://paper-api.alpaca.markets"` (paper). Data from `data.alpaca.markets`; price fallback FMP.
-- **Cron:** `2012b969-2e9a-48ee-a0e2-7049f1e27a07` — "DI faithful SOXL control — hourly (paper)", schedule `30 6-12 * * 1-5` America/Los_Angeles, runtime `codex/gpt-5.5`, command:
-  `FAITHFUL_EXECUTION_ENABLED=true python3 .../faithful_control.py`
+- **Schedule:** hourly, `30 6-12 * * 1-5` America/Los_Angeles, command `FAITHFUL_EXECUTION_ENABLED=true python3 …/faithful_control.py`. (Execution-runtime note: see §10 — being moved to a deterministic OS cron.)
 
 ## 2. Safety architecture (dual gate)
 Real orders are placed **only if BOTH** are true:
@@ -33,7 +32,9 @@ Real orders are placed **only if BOTH** are true:
 | Sell target | rung × 1.024, **pegged to the rung** (not the fill) | statement: buy at $121.44 → sell $127.93 = 124.93×1.024 |
 | Sell arming | two-step: sell placed **only after** the buy fills | patent Claim-1 mechanic; our reconcile step |
 | Order type | GTC limit | statement: all GTC |
-| Stop / regime / exposure cap | **NONE** | faithful — exposure can reach 100% as price falls (documented failure mode, kept on purpose to measure) |
+| Stop / regime / exposure cap | **No explicit cap** | but see note below — cash-available sizing makes exposure **self-limit** |
+
+> **Exposure correction (reviewer catch, 2026-08-13).** Because each block is 2.5% of *remaining* cash, deployed cash decays as `0.975ⁿ`: ~35 rungs down (≈ a −58% SOXL move) leaves ~41% cash / ~59% deployed — landing on Aaron's observed ~61%. So this arm is **structurally self-limiting**, not the patent's uncapped ~100% tail. It is therefore the **Aaron-faithful replica**, not the pure uncapped patent. Consequence: a hard exposure-cap treatment (T4) tested against this baseline is measured against an already-throttled control. Resolution pending owner decision (§5): keep this as the live baseline and run the **uncapped pure-patent** (equity-basis sizing) as a *sim* reference for clean cap comparisons, **or** switch the live arm to equity-basis sizing and move cash-available to a treatment.
 
 ## 4. The engine (v3 — how it maintains the ladder)
 1. **Fixed anchored lattice.** Rung prices are `anchor × (1+s)^n` for integer `n`. The `anchor` is set **once when flat** and persisted in `faithful_control_state.json`; it does **not** move with live price. (v2 bug: recomputed rungs off the moving price each cycle → prices drifted → dedup failed → order stack ran to 29. v3 fixes this at the root.)
@@ -57,12 +58,12 @@ Real orders are placed **only if BOTH** are true:
 
 ## 7. Read-only dashboard (separate, cannot trade)
 - `dashboard.py` → static HTML, **GET-only** (grep-verified: no POST/DELETE/PUT). Cannot place/cancel orders.
-- Published keyless to GitHub Pages (mini generates HTML, verifies no secret is present with a hard-abort, pushes only the finished page). Hourly refresh cron `72d6f310`.
+- Published keyless to GitHub Pages (mini generates HTML, verifies no secret is present with a hard-abort, pushes only the finished page). Refreshed hourly.
 - Live SOXL price + projected-buy ladders (up/down) via a **keyless** public quote feed (CNBC, client-side, CORS); account tiles refresh hourly.
 - URL: https://woodschase-dot.github.io/soxl-desk-611ea73d/
 
 ## 8. Live state snapshot (2026-08-13, ~08:15 PT)
-- Account `PA3OU2TOQR1N`, **paper**: equity **$100,233.02**, cash **$100,233.02**, positions **FLAT**.
+- Account `PA3···QR1N` (Alpaca **paper**): equity **$100,233.02**, cash **$100,233.02**, positions **FLAT**.
 - Anchor **$148.68**. Resting GTC buys (re-centered as SOXL rose past the anchor rung):
   `148.68 ×15 · 145.20 ×17 · 141.79 ×17 · 138.47 ×17 · 135.22 ×17` — clean 2.4% lattice, exactly 5, no stacking.
 - Realized $0, unrealized $0, no fills yet.
@@ -77,6 +78,9 @@ Real orders are placed **only if BOTH** are true:
 7. Ledger headline is marked NAV; drawdown off marked-NAV peak.
 8. Reconcile adopts orphan buys, never double-places a resting price; state writes atomic.
 9. Live broker state matches §8 (independently queryable).
+
+## 10. Execution-runtime note (reviewer catch, 2026-08-13)
+The armed cycle currently runs via an OpenClaw isolated **agent-turn** (LLM runtime, codex/gpt-5.5) instructed to run the exact command. That places a nondeterministic layer between the scheduler and an armed trading script. **Planned fix:** move armed execution to a deterministic OS cron (`crontab`/launchd) running the command directly (plain shell, no LLM), and keep an OpenClaw agent only as a *read-only* reporter of state. Until then, the agent-turn is tightly scoped ("run EXACTLY this command; do not edit; do not touch other routes").
 
 ---
 *Reference implementation of the Decisive Investor block ladder; retained as the honest control arm. Backtest verdict: DISQUALIFIED-as-designed (volatility-harvesting martingale — many small wins hiding an open-ended tail). Aaron's July statement (−57% SOXL: +$23.5k realized / −$77.6k unrealized ≈ −$54k) is the real-money confirmation.*
