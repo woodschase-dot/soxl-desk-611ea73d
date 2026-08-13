@@ -39,17 +39,17 @@
 </style></head><body><div class="wrap">
   <div class="bar">
     <div><h1>DI SOXL Control — Paper Account</h1>
-      <div class="muted">Alpaca paper · SOXL $150.40 · generated 2026-08-13 08:48 PDT</div></div>
-    <div><span class="pill warn">ARMED — placing paper orders</span></div>
+      <div class="muted">Alpaca paper · SOXL $150.99 · generated 2026-08-13 09:05 PDT</div></div>
+    <div><span class="pill ok">DISARMED — read-only, no orders</span></div>
   </div>
 
-  <div class="card hero"><div><div class="muted">SOXL — <span id="qsrc">snapshot</span></div><div class="price" id="px">$150.40</div></div>
-    <div class="tag">anchored grid from $148.68 · rungs every 2.4% · holds 5 buys below price</div></div>
+  <div class="card hero"><div><div class="muted">SOXL — <span id="qsrc">snapshot</span></div><div class="price" id="px">$150.99</div></div>
+    <div class="tag">anchored grid from — · rungs every 2.4% · holds 5 buys below price</div></div>
 
-  <div class="grid-tiles"><div class="tile"><div class="label">Marked NAV</div><div class="val ">$100,203.92</div><div class="sub">cash + positions, incl. unrealized</div></div><div class="tile"><div class="label">vs inception</div><div class="val pos">+0.27%</div><div class="sub">from $99,938.86</div></div><div class="tile"><div class="label">Exposure</div><div class="val ">2.1%</div><div class="sub">invested / marked NAV</div></div><div class="tile"><div class="label">Current drawdown</div><div class="val neg">-0.03%</div><div class="sub">off marked-NAV peak</div></div><div class="tile"><div class="label">Max drawdown</div><div class="val ">0.00%</div><div class="sub">exposure there: 0%  ← kill metric</div></div><div class="tile"><div class="label">Cash</div><div class="val ">$98,101.68</div></div><div class="tile"><div class="label">Realized P&L</div><div class="val pos">$0.00</div><div class="sub">closed round-trips</div></div><div class="tile"><div class="label">Unrealized P&L</div><div class="val neg">$-29.10</div><div class="sub">mark-to-market on open blocks</div></div></div>
+  <div class="grid-tiles"><div class="tile"><div class="label">Marked NAV</div><div class="val ">$100,202.32</div><div class="sub">cash + positions, incl. unrealized</div></div><div class="tile"><div class="label">vs inception</div><div class="val pos">+0.26%</div><div class="sub">from $99,938.86</div></div><div class="tile"><div class="label">Exposure</div><div class="val ">0.0%</div><div class="sub">invested / marked NAV</div></div><div class="tile"><div class="label">Current drawdown</div><div class="val neg">-0.03%</div><div class="sub">off marked-NAV peak</div></div><div class="tile"><div class="label">Max drawdown</div><div class="val ">0.00%</div><div class="sub">exposure there: 0%  ← kill metric</div></div><div class="tile"><div class="label">Cash</div><div class="val ">$100,202.32</div></div><div class="tile"><div class="label">Realized P&L</div><div class="val pos">$0.00</div><div class="sub">closed round-trips</div></div><div class="tile"><div class="label">Unrealized P&L</div><div class="val pos">$0.00</div><div class="sub">mark-to-market on open blocks</div></div></div>
 
-  <div class="card"><h2>Projected buys as SOXL rises</h2><table><thead><tr><th class="r">Buy @</th><th class="r">SOXL must rise</th><th class="r">Est. shares</th><th class="r">Sell target</th></tr></thead><tbody id="projbody"><tr><td class="r">$152.25</td><td class="r pos">+1.2%</td><td class="r">16</td><td class="r">$155.90</td></tr><tr><td class="r">$155.90</td><td class="r pos">+3.7%</td><td class="r">15</td><td class="r">$159.64</td></tr><tr><td class="r">$159.64</td><td class="r pos">+6.1%</td><td class="r">15</td><td class="r">$163.47</td></tr><tr><td class="r">$163.48</td><td class="r pos">+8.7%</td><td class="r">15</td><td class="r">$167.40</td></tr><tr><td class="r">$167.40</td><td class="r pos">+11.3%</td><td class="r">14</td><td class="r">$171.42</td></tr><tr><td class="r">$171.42</td><td class="r pos">+14.0%</td><td class="r">14</td><td class="r">$175.53</td></tr><tr><td class="r">$175.53</td><td class="r pos">+16.7%</td><td class="r">13</td><td class="r">$179.74</td></tr><tr><td class="r">$179.74</td><td class="r pos">+19.5%</td><td class="r">13</td><td class="r">$184.05</td></tr></tbody></table>
-    <div class="note">The grid is a <b>fixed lattice</b> anchored at $148.68 (rungs every 2.4%). As SOXL climbs past each level below, that buy is placed automatically and the ladder re-centers up — so these are the next resting buys in line. Est. shares assume current cash; sell target = buy × 1.024.</div></div>
+  <div class="card"><h2>Projected buys as SOXL rises</h2><div class="empty">Projection unavailable until the grid is armed and an anchor is set.</div>
+    <div class="note">The grid is a <b>fixed lattice</b> anchored at — (rungs every 2.4%). As SOXL climbs past each level below, that buy is placed automatically and the ladder re-centers up — so these are the next resting buys in line. Est. shares assume current cash; sell target = buy × 1.024.</div></div>
 
   <div class="card"><h2>Marked NAV (tail-first)</h2><svg viewBox="0 0 680 240" class="chart" role="img" aria-label="Marked NAV over time">
       <line x1="32" y1="32.0" x2="648" y2="32.0" class="grid"/><text x="26" y="35.0" text-anchor="end" class="axis">$100,234</text><line x1="32" y1="76.0" x2="648" y2="76.0" class="grid"/><text x="26" y="79.0" text-anchor="end" class="axis">$100,234</text><line x1="32" y1="120.0" x2="648" y2="120.0" class="grid"/><text x="26" y="123.0" text-anchor="end" class="axis">$100,234</text><line x1="32" y1="164.0" x2="648" y2="164.0" class="grid"/><text x="26" y="167.0" text-anchor="end" class="axis">$100,233</text><line x1="32" y1="208.0" x2="648" y2="208.0" class="grid"/><text x="26" y="211.0" text-anchor="end" class="axis">$100,233</text>
@@ -59,10 +59,10 @@
     <div class="note">The line is cash + mark-to-market of held blocks — the only honest NAV.
     A rising line during a decline would mean warehousing losers, so watch drawdown + exposure, not win rate.</div></div>
 
-  <div class="card"><h2>Potential buys as SOXL falls</h2><table><thead><tr><th class="r">Buy @</th><th class="r">SOXL falls</th><th class="r">Shares</th><th class="r">Sell target</th></tr></thead><tbody id="fallsbody"><tr><td class="r">$148.68</td><td class="r neg">-1.1%</td><td class="r">15</td><td class="r">$152.25</td></tr><tr><td class="r">$145.20</td><td class="r neg">-3.5%</td><td class="r">17</td><td class="r">$148.68</td></tr><tr><td class="r">$141.79</td><td class="r neg">-5.7%</td><td class="r">17</td><td class="r">$145.19</td></tr><tr><td class="r">$138.47</td><td class="r neg">-7.9%</td><td class="r">17</td><td class="r">$141.79</td></tr></tbody></table>
+  <div class="card"><h2>Potential buys as SOXL falls</h2><div class="empty">No resting buys right now.</div>
     <div class="note">Live GTC buy limits resting <b>below</b> the price — each fills automatically if SOXL drops to it, then arms a sell one rung up (× 1.024). "SOXL falls" updates live as the price ticks.</div></div>
   
-  <div class="card"><h2>Positions</h2><table><thead><tr><th>Symbol</th><th class="r">Qty</th><th class="r">Avg entry</th><th class="r">Last</th><th class="r">Mkt value</th><th class="r">Unrealized</th></tr></thead><tbody><tr><td>SOXL</td><td class="r">14</td><td class="r">$152.24</td><td class="r">$150.16</td><td class="r">$2,102.24</td><td class="r neg">$-29.10</td></tr></tbody></table></div>
+  <div class="card"><h2>Positions</h2><div class="empty">Flat — no open positions.</div></div>
 
   <div class="note">Read-only view · paper account only · this page places no orders.
   The strategy is a volatility-harvesting martingale (no stop, exposure can reach 100%); the number
@@ -70,7 +70,7 @@
   Live price + projected ladder update every ~20s from a public quote feed; account tiles refresh hourly.</div>
 </div>
 <script>
-const GRID={"anchor": 148.68, "spacing": 0.024, "blockPct": 0.025, "cash": 98101.68, "projectUp": 8, "restingBuys": [[148.68, 15], [145.2, 17], [141.79, 17], [138.47, 17]]};
+const GRID={"anchor": 0, "spacing": 0.024, "blockPct": 0.025, "cash": 100202.32, "projectUp": 8, "restingBuys": []};
 const CNBC='https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol?symbols=SOXL&requestMethod=itv&noform=1&partnerId=2&fund=1&exthrs=1&output=json';
 function money(x){return '$'+x.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});}
 function proj(px){
