@@ -1,6 +1,6 @@
 # SOP — Faithful Decisive-Investor SOXL Control (Alpaca Paper)
 
-**System:** `faithful_control.py` v3 · **Venue:** Alpaca **paper** only · **Status:** DISARMED 2026-08-13 (hardening — single-instance lock + price guard + OS-cron migration; re-arm gated on review + owner go)
+**System:** `faithful_control.py` v3 · **Venue:** Alpaca **paper** only · **Status:** ARMED (LIVE-PAPER) 2026-08-13 — full review passed (D1–D4, R1–R3, N1–N2); deterministic **launchd** scheduler (no LLM in the execution path); agent-turn cron dead (single fire); read-only reporter wired.
 **Purpose:** Forward-paper-trade the Decisive Investor patent (US 8,589,281 B1) **faithfully**, as the *control arm* of a research experiment, so we can later measure whether risk treatments improve it. This document is for an external reviewer (Claude) to verify the live system against.
 
 > Not financial advice. Paper account only. Real-money execution is never in scope for this file.
@@ -9,7 +9,8 @@
 
 ## 1. Fingerprint (verify these first)
 - **File:** `trading/strategy_lab/soxl-block/faithful_control.py` (workspace-relative)
-- **sha256 (current — hardened, DISARMED):** `e588e61349ee9a296750e979d41fcdb30ae18b423d5b0fb1d9eb98d409b1dd9d`
+- **sha256 — reviewed bytes (DISARMED):** `e588e61349ee9a296750e979d41fcdb30ae18b423d5b0fb1d9eb98d409b1dd9d`
+- **sha256 — deployed (ARMED):** `2ab7fd5693643eaf444df0e50b04b3551799a6a30dabe1f0b3d0638c0e585569` (differs from the reviewed bytes **only** by the `ARMED = True` literal + its comment)
 - **sha lineage:** `ac3a32d9` (v2 verified-logic) → `5bc04b40` (v2 armed) → `77eb02d4` (v3 disarmed) → `039f40b3` (v3 armed **unreviewed** ~07:10–08:5x PT 2026-08-13; one partial fill; flattened) → `32957e44` (v3+ lock + price guard) → `5051cc85` (D1–D4 review fixes) → `7e88f915` (R1–R3 residuals) → **`e588e613`** (N1: synthetic price can't suppress a real buy; N2: exposure+drawdown on the guard-trip row). DISARMED. Arming flips only the `ARMED` literal.
 - **Verify deployed == published (do not trust a hash typed into a doc):**
   `shasum -a 256 <path>/faithful_control.py` **and** `git show <commit>:faithful_control.py | shasum -a 256` — both must equal the value above.
@@ -71,10 +72,11 @@ The earlier draft called the live account "Arm 0, pure patent" **and** listed ca
 - Live SOXL price + projected-buy ladders (up/down) via a **keyless** public quote feed (CNBC, client-side, CORS); account tiles refresh hourly.
 - URL: https://woodschase-dot.github.io/soxl-desk-611ea73d/
 
-## 8. Live state snapshot (2026-08-13, ~09:05 PT — DISARMED)
-- Account `PA3···QR1N` (Alpaca **paper**): equity **$100,202.32**, cash = equity, **FLAT**, **0 open orders**.
-- Disarmed for hardening; state file archived → fresh anchor on re-arm.
-- The v3 armed run (~07:10–08:5x PT) placed the anchored ladder, re-centered up correctly as SOXL rose past the anchor rung, and took **one partial fill** (14 sh at the $135.22 rung on a dip) — the first live fill. No stacking occurred (anchored lattice held ≤5). Position flattened on disarm.
+## 8. Live state snapshot (2026-08-13, ~09:5x PT — ARMED)
+- Account `PA3···QR1N` (Alpaca **paper**): cash **$100,202.32**, **FLAT**, anchor **151.26**.
+- 5 resting GTC buys, **16 sh each**: 147.71 · 144.25 · 140.87 · 137.57 · 134.35 (exact 2.4% lattice below price; no stacking). Flat share counts are correct here — sequential `committed` deduction cancels the rise cheaper rungs would otherwise produce (without it: 16/17/17/18/18).
+- Scheduler: **launchd** `ai.soxl.faithfulcontrol` (`:30`, hours 6–12), wrapper `run_faithful.sh` → reporter drains `NEEDS_ATTENTION.log`/`EVENTS.log`. Agent-turn cron `2012b969` **disabled**.
+- Verification still owed at live fills: D1 (no double-sell) and D2 (cancel-a-filled → held) fault-injected against a **single rung on the first natural fill**, broker-direct.
 
 ## 9. Verification checklist for the reviewer
 1. sha256 of the deployed file == `039f40b3…d331`.

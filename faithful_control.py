@@ -50,7 +50,7 @@ WINDOW_RUNGS   = 5         # pending buy rungs below price (patent 3-5; NOT Aaro
 BLOCK_PCT      = 0.025     # per-block size = 2.5% of the sizing basis (~= patent g=20%)
 EQUITY_BASIS   = "cash_available"   # cash_available | marked_nav
 PRICE_GUARD    = 0.35      # reject a quote that jumped >35% vs the last accepted cycle (bad-print guard)
-ARMED          = False     # <-- FILE GATE. DISARMED 2026-08-13 to harden (single-instance lock, price guard, OS-cron migration) per reviewer.
+ARMED          = True      # <-- FILE GATE. ARMED 2026-08-13 after full review (D1-D4,R1-R3,N1-N2) via launchd (deterministic), single-scheduler.
                            #     Second gate: env FAITHFUL_EXECUTION_ENABLED=true must also be set.
 
 BASE   = "https://paper-api.alpaca.markets"
