@@ -9,8 +9,10 @@
 
 ## 1. Fingerprint (verify these first)
 - **File:** `trading/strategy_lab/soxl-block/faithful_control.py` (workspace-relative)
-- **sha256 (current — hardened, DISARMED):** `32957e44c5ab790dfb351dc8b338aa601e40bebba42dd7bfef92eec83d9e57f0`
-- **sha lineage:** `ac3a32d9` (v2 verified-logic) → `5bc04b40` (v2 armed) → `77eb02d4` (v3 disarmed) → `039f40b3` (v3 armed; ran ~07:10–08:5x PT 2026-08-13, took one partial fill, then flattened) → **`32957e44`** (v3+ hardened: `fcntl` single-instance lock + price guard; DISARMED). Arming flips only the `ARMED` literal.
+- **sha256 (current — hardened, DISARMED):** `5051cc8538b948d52e9b5a2d564a6109a4fb8385adfb0ee487241b6d0cc0d59d`
+- **sha lineage:** `ac3a32d9` (v2 verified-logic) → `5bc04b40` (v2 armed) → `77eb02d4` (v3 disarmed) → `039f40b3` (v3 armed **unreviewed** ~07:10–08:5x PT 2026-08-13; one partial fill; flattened) → `32957e44` (v3+ lock + price guard) → **`5051cc85`** (v3+ with review defects D1–D4 fixed; §11). DISARMED. Arming flips only the `ARMED` literal.
+- **Verify deployed == published (do not trust a hash typed into a doc):**
+  `shasum -a 256 <path>/faithful_control.py` **and** `git show <commit>:faithful_control.py | shasum -a 256` — both must equal the value above.
 - **The actual bytes:** `faithful_control.py` is published in this repo for independent hashing/review (paper-only, stdlib, no credentials in the file).
 - **Dependencies:** Python **stdlib only** (`json, os, sys, math, fcntl, urllib`). No `alpaca-py`, no pandas. Broker I/O hand-rolled over `urllib`.
 - **Endpoint:** hard-coded `BASE = "https://paper-api.alpaca.markets"` (paper). Data from `data.alpaca.markets`; price fallback FMP.
@@ -91,6 +93,16 @@ The v3 armed cycle ran via an OpenClaw isolated **agent-turn** (LLM runtime, cod
 2. Dry-run it (ARMED=False) and confirm **exactly one** process fires per tick.
 3. Flip `ARMED=True`; keep the agent-turn cron disabled (an OpenClaw agent stays only as a *read-only* reporter).
 The `fcntl` single-instance lock (§4.9) is the backstop that makes even an accidental double-schedule safe.
+
+## 11. Defects fixed after external code review (2026-08-13)
+All four found by adversarial code review; fixed in sha `5051cc85`, dry-run + unit-tested.
+- **D1 (high) — sell leg had no crash guard.** A crash after the broker accepted a sell but before `save_state` left the block persisted as `held` → next cycle placed a *second* sell (the v2 buy-bug, un-ported to sells). Fix: reconcile now tracks resting sells and **adopts** orphan sells; before placing, a `held` block whose target already rests as a sell adopts it instead of double-placing.
+- **D2 (high) — cancel race orphaned a filled position.** `cancel()` swallowed errors and the block was deleted regardless; an order that filled between the status check and the cancel was dropped → shares held with no block, no sell, no ledger. Fix: `cancel()` returns success/failure; on failure the order is re-checked and **promoted to `held`** if filled (so its sell is placed next cycle), only deleted if truly canceled.
+- **D3 (high) — price guard latched forever, silently.** A genuine >35% move tripped the guard, which then compared every later cycle against the stale pre-move price and tripped forever, while the cron stayed silent. Fix: **confirm-on-second** (a suspect move is accepted once the next quote confirms it), and a trip is now a **loud non-zero exit** the reporter surfaces.
+- **D4 (low) — `broker_resting` mixed sides.** Resting *sells* (at exact `rung×1.024` lattice points) could suppress *buy* placement at the same price. Fix: buys and sells tracked separately; only buys suppress buy placement.
+
+## 12. Re-arm sequence (gated on review + owner go)
+Patched file → new sha (both hashes, deployed vs published) → dry-run cycles **incl. a forced guard trip and a kill-mid-sell-place fault-injection** → install OS `crontab`, confirm the agent-turn cron is dead → confirm exactly one process fires → `ARMED=True`.
 
 ---
 *Reference implementation of the Decisive Investor block ladder; retained as the honest control arm. Backtest verdict: DISQUALIFIED-as-designed (volatility-harvesting martingale — many small wins hiding an open-ended tail). Aaron's July statement (−57% SOXL: +$23.5k realized / −$77.6k unrealized ≈ −$54k) is the real-money confirmation.*

@@ -117,11 +117,15 @@ def place_limit(side, qty, limit):
     return f"DRYRUN-{side}-{limit:.2f}"
 
 def cancel(oid):
-    if LIVE:
-        try: _req("DELETE", f"{BASE}/v2/orders/{oid}")   # 204/empty -> None -> success
-        except Exception as ex: log(f"  cancel FAILED {oid}: {ex}")
-    else:
-        log(f"  [DRY] would cancel order {oid}")
+    """Return True iff the cancel is accepted (204/empty). False on error (e.g. the order
+    already filled) so callers can re-check instead of blindly dropping the block (reviewer D2)."""
+    if not LIVE:
+        log(f"  [DRY] would cancel order {oid}"); return True
+    try:
+        _req("DELETE", f"{BASE}/v2/orders/{oid}")        # 204/empty -> None -> success
+        return True
+    except Exception as ex:
+        log(f"  cancel FAILED {oid}: {ex}"); return False
 
 # ----------------------------- state / logging ------------------------------ #
 def now(): return dt.datetime.now(dt.timezone.utc).isoformat()
@@ -158,33 +162,54 @@ def run():
     st = load_state()
     blocks = st["blocks"]        # key -> {level, buy, target, shares, status, buy_id, sell_id, buy_fill}
 
-    # ---- PRICE SANITY GUARD (reviewer): never place/cancel off a bad or implausible quote ----
-    last_px = st.get("last_px")
-    if px is None or px <= 0 or (last_px and abs(px / last_px - 1) > PRICE_GUARD):
-        log(f"=== FAITHFUL SOXL CONTROL v3 [{mode}] {now()} === ⚠️ PRICE GUARD: "
-            f"px={px} vs last_accepted={last_px} (>{PRICE_GUARD:.0%} jump or invalid) — "
-            f"NO orders placed/cancelled this cycle.")
-        return {"ts": now(), "mode": mode, "price": px, "price_guard": "tripped", "last_px": last_px}
-    st["last_px"] = px
+    # ---- PRICE SANITY GUARD (reviewer D3): trip on a bad/implausible quote, but CONFIRM-ON-SECOND
+    #      so a genuine >35% move can't latch the guard forever; a trip is a LOUD (non-zero) exit. ----
+    last_px = st.get("last_px"); guard_px = st.get("guard_px")
+    invalid = (px is None or px <= 0)
+    jump = (last_px is not None and not invalid and abs(px / last_px - 1) > PRICE_GUARD)
+    if invalid or jump:
+        confirmed = (jump and guard_px is not None and abs(px / guard_px - 1) <= PRICE_GUARD)
+        if not confirmed:
+            st["guard_px"] = (None if invalid else px)   # remember the suspect for next-cycle confirmation
+            save_state(st)
+            log(f"=== FAITHFUL SOXL CONTROL v3 [{mode}] {now()} === ⚠️ PRICE GUARD TRIPPED: "
+                f"px={px} vs last_accepted={last_px} (>{PRICE_GUARD:.0%} jump/invalid). "
+                f"NO orders this cycle; awaiting a confirming quote.")
+            return {"ts": now(), "mode": mode, "price": px, "price_guard": "tripped", "last_px": last_px}
+        log(f"  PRICE GUARD released: {px:.2f} confirmed by two consecutive quotes (was suspect {guard_px}).")
+    st["last_px"] = px; st["guard_px"] = None
     log(f"=== FAITHFUL SOXL CONTROL v3 [{mode}] {now()} === price={px:.2f} equity={equity:,.2f} cash={cash:,.2f}")
 
     try:
-        # 0) BROKER RECONCILE (LIVE): adopt orphan buys, exclude any resting price ----
-        broker_resting = set()
+        # 0) BROKER RECONCILE (LIVE) — sides kept SEPARATE (reviewer D4); adopt orphan buys AND sells (D1)
+        broker_buys = set()          # resting BUY prices -> suppress duplicate BUY placement (buys only)
+        broker_sells = {}            # resting SELL price -> order id -> adopt/skip sells; never suppress buys
         if LIVE:
             known = ({b.get("buy_id") for b in blocks.values()} |
                      {b.get("sell_id") for b in blocks.values()})
             for o in list_open_orders():
                 if o.get("symbol") != SYMBOL or not o.get("limit_price"): continue
-                lp = round(float(o["limit_price"]), 2); broker_resting.add(lp)
-                if o["id"] in known: continue
+                lp = round(float(o["limit_price"]), 2)
                 if o["side"] == "buy":
+                    broker_buys.add(lp)
+                    if o["id"] in known: continue
                     blocks[f"orphan-{o['id'][:8]}"] = {"level": None, "buy": lp,
                         "target": round(lp * (1 + SPACING), 2), "shares": int(float(o["qty"])),
                         "status": "pending_buy", "buy_id": o["id"], "sell_id": None, "buy_fill": None}
                     log(f"  [RECONCILE] adopted orphan BUY {o['qty']} @ {lp:.2f}")
-                else:
-                    log(f"  [RECONCILE] WARNING unknown open SELL {o['qty']} @ {lp:.2f} (id {o['id']})")
+                else:                                    # sell
+                    broker_sells[lp] = o["id"]
+                    if o["id"] in known: continue
+                    m = next((b for b in blocks.values()
+                              if round(b.get("target", 0), 2) == lp and b["status"] in ("held", "pending_sell")), None)
+                    if m:
+                        m["sell_id"] = o["id"]; m["status"] = "pending_sell"
+                        log(f"  [RECONCILE] adopted orphan SELL {o['qty']} @ {lp:.2f} -> block")
+                    else:                                # sell with no block -> track it so the shares aren't orphaned
+                        blocks[f"osell-{o['id'][:8]}"] = {"level": None, "buy": round(lp / (1 + SPACING), 2),
+                            "target": lp, "shares": int(float(o["qty"])), "status": "pending_sell",
+                            "buy_id": None, "sell_id": o["id"], "buy_fill": None}
+                        log(f"  [RECONCILE] adopted orphan SELL {o['qty']} @ {lp:.2f} (synthesized tracked block)")
 
         # 1) reconcile block lifecycle (fills -> sells -> realized) --------------------
         for key, b in list(blocks.items()):
@@ -195,8 +220,13 @@ def run():
                 elif o and o.get("status") in ("canceled", "expired", "rejected"):
                     del blocks[key]; continue
             if b["status"] == "held":                    # arm the rung-pegged conditional sell
-                b["sell_id"] = place_limit("sell", b["shares"], b["target"]); b["status"] = "pending_sell"
-                save_state(st)
+                tgt = round(b["target"], 2)
+                if LIVE and tgt in broker_sells:         # D1: a sell already rests here -> adopt, never double-place
+                    b["sell_id"] = broker_sells[tgt]
+                    log(f"  [RECONCILE] sell already resting @ {tgt:.2f}; adopted (no double-place)")
+                else:
+                    b["sell_id"] = place_limit("sell", b["shares"], tgt)
+                b["status"] = "pending_sell"; save_state(st)
             if b["status"] == "pending_sell" and LIVE:
                 o = get_order(b["sell_id"])
                 if o and o.get("status") == "filled":
@@ -216,10 +246,19 @@ def run():
         target_rungs = window_rungs(anchor, px)          # [(level, price), ...]
         target_prices = {pr for _, pr in target_rungs}
         for key, b in list(blocks.items()):              # cancel pending buys outside the window
-            if b["status"] == "pending_buy" and round(b["buy"], 2) not in target_prices:
-                cancel(b["buy_id"]); del blocks[key]; save_state(st)
+            if b["status"] != "pending_buy" or round(b["buy"], 2) in target_prices: continue
+            if cancel(b["buy_id"]):                       # confirmed cancel -> safe to drop the block
+                del blocks[key]; save_state(st)
+            else:                                         # D2: cancel failed -> may have FILLED; never drop blindly
+                o = get_order(b["buy_id"]) if LIVE else None
+                if o and o.get("status") == "filled":
+                    b["buy_fill"] = float(o["filled_avg_price"]); b["status"] = "held"; save_state(st)
+                    log(f"  [RECONCILE] out-of-window cancel FAILED but order FILLED @ {b['buy_fill']:.2f} -> held (sell next cycle)")
+                elif o and o.get("status") in ("canceled", "expired", "rejected"):
+                    del blocks[key]; save_state(st)
+                # else: still live/pending -> leave it, retry next cycle
 
-        open_prices = {round(b["buy"], 2) for b in blocks.values()} | broker_resting
+        open_prices = {round(b["buy"], 2) for b in blocks.values()} | broker_buys   # D4: buys only
         committed = sum(b["shares"] * b["buy"] for b in blocks.values() if b["status"] == "pending_buy")
         for level, rung in target_rungs:
             if rung in open_prices: continue
@@ -260,4 +299,7 @@ def run():
 
 if __name__ == "__main__":
     _lock = acquire_single_instance_lock()   # exits if another instance holds it
-    run()
+    _res = run()
+    if isinstance(_res, dict) and _res.get("price_guard") == "tripped":
+        print("ALERT: PRICE GUARD tripped — no orders placed this cycle; needs attention.", file=sys.stderr)
+        sys.exit(3)                          # loud (non-zero) so the scheduler/reporter surfaces it

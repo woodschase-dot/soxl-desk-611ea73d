@@ -11,7 +11,8 @@ Over 2026-08-11→08-12 the armed v2 control accumulated **~29 resting buy order
 - 08-12 06:30 — cycle reported **6 pending** (not 5) and **4 cancels FAILED** with `Expecting value: line 1 column 1` (JSON parse error on the DELETE responses).
 - Through 08-12 — order count grew toward ~29; a dip filled blocks, leaving a 51-share position.
 - 08-12 evening — disarmed (`ARMED=False`), cron disabled, all orders cancelled (finalized at next open), `_req` cancel bug fixed.
-- 08-13 07:10 — v3 (anchored lattice + cash-available sizing) armed from a flat slate after review.
+- 08-13 07:10 — v3 (anchored lattice + cash-available sizing) armed from a flat slate. **Process finding (not sanded out):** v3 was armed **unreviewed** — on the owner's "arm it," *before* external review returned. Correct order (now enforced) is review → arm.
+- 08-13 ~09:00 — external code review found 4 defects (D1–D4); system disarmed, hardened, re-review pending.
 
 ## Root cause (two compounding bugs)
 1. **Moving-anchor ladder (primary).** v2 recomputed every rung off the *live price each cycle* (`rung = round(px·(1−s)^j, 2)`). As price drifted between cycles, the computed rung prices shifted, so the "is this rung already resting?" dedup (keyed on exact price) never matched the prior cycle's orders. Result: each cycle believed the window was empty and placed a fresh set — orders accumulated instead of being reused.
