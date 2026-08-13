@@ -9,8 +9,8 @@
 
 ## 1. Fingerprint (verify these first)
 - **File:** `trading/strategy_lab/soxl-block/faithful_control.py` (workspace-relative)
-- **sha256 (current — hardened, DISARMED):** `7e88f9154d18447ba171f9bf4e28540baee0d55a06af3ead6b7e3f71403bbc2e`
-- **sha lineage:** `ac3a32d9` (v2 verified-logic) → `5bc04b40` (v2 armed) → `77eb02d4` (v3 disarmed) → `039f40b3` (v3 armed **unreviewed** ~07:10–08:5x PT 2026-08-13; one partial fill; flattened) → `32957e44` (v3+ lock + price guard) → `5051cc85` (D1–D4 review fixes) → **`7e88f915`** (R1–R3 residuals: no synthetic P&L, guard-trip ledger row, partial-sell warning). DISARMED. Arming flips only the `ARMED` literal.
+- **sha256 (current — hardened, DISARMED):** `e588e61349ee9a296750e979d41fcdb30ae18b423d5b0fb1d9eb98d409b1dd9d`
+- **sha lineage:** `ac3a32d9` (v2 verified-logic) → `5bc04b40` (v2 armed) → `77eb02d4` (v3 disarmed) → `039f40b3` (v3 armed **unreviewed** ~07:10–08:5x PT 2026-08-13; one partial fill; flattened) → `32957e44` (v3+ lock + price guard) → `5051cc85` (D1–D4 review fixes) → `7e88f915` (R1–R3 residuals) → **`e588e613`** (N1: synthetic price can't suppress a real buy; N2: exposure+drawdown on the guard-trip row). DISARMED. Arming flips only the `ARMED` literal.
 - **Verify deployed == published (do not trust a hash typed into a doc):**
   `shasum -a 256 <path>/faithful_control.py` **and** `git show <commit>:faithful_control.py | shasum -a 256` — both must equal the value above.
 - **The actual bytes:** `faithful_control.py` is published in this repo for independent hashing/review (paper-only, stdlib, no credentials in the file).

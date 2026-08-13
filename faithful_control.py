@@ -178,9 +178,12 @@ def run():
             if LIVE:                                     # R3: the tail event is exactly what to record — write a flagged snapshot
                 p = get_position(); mv = float(p["market_value"]) if p else 0.0
                 upnl = float(p["unrealized_pl"]) if p else 0.0
+                mnav = cash + mv; peak = st.get("equity_peak") or mnav   # running max; a fall doesn't raise it
                 gsnap = {"ts": now(), "mode": mode, "price": px, "price_guard": "tripped",
-                         "marked_nav": cash + mv, "cash": cash, "position_mv": mv,
-                         "unrealized_pnl": upnl, "last_px": last_px}
+                         "marked_nav": mnav, "cash": cash, "position_mv": mv, "unrealized_pnl": upnl,
+                         "exposure_pct": (mv / mnav * 100 if mnav else 0),                  # N2: the kill metric,
+                         "current_drawdown_pct": ((mnav / peak - 1) * 100 if peak else 0),  #     on the cycle it matters
+                         "last_px": last_px}
                 with open(LEDGER, "a") as f: f.write(json.dumps(gsnap) + "\n")   # durable signal the reporter watches (R2)
             return {"ts": now(), "mode": mode, "price": px, "price_guard": "tripped", "last_px": last_px}
         log(f"  PRICE GUARD released: {px:.2f} confirmed by two consecutive quotes (was suspect {guard_px}).")
@@ -217,7 +220,7 @@ def run():
                         else:
                             log(f"  [RECONCILE] adopted orphan SELL {sq} @ {lp:.2f} -> block")
                     else:                                # sell with no block -> track it, but DO NOT invent a cost basis (R1)
-                        blocks[f"osell-{o['id'][:8]}"] = {"level": None, "buy": round(lp / (1 + SPACING), 2),
+                        blocks[f"osell-{o['id'][:8]}"] = {"level": None, "buy": None,   # N1: no invented price -> no vote on rung placement
                             "target": lp, "shares": sq, "status": "pending_sell",
                             "buy_id": None, "sell_id": o["id"], "buy_fill": None, "synthetic": True}
                         log(f"  [RECONCILE] adopted orphan SELL {sq} @ {lp:.2f} (SYNTHETIC — excluded from realized P&L)")
@@ -275,7 +278,8 @@ def run():
                     del blocks[key]; save_state(st)
                 # else: still live/pending -> leave it, retry next cycle
 
-        open_prices = {round(b["buy"], 2) for b in blocks.values()} | broker_buys   # D4: buys only
+        open_prices = {round(b["buy"], 2) for b in blocks.values()
+                       if b.get("buy") is not None} | broker_buys   # D4 buys only; N1: skip synthetic (no invented price)
         committed = sum(b["shares"] * b["buy"] for b in blocks.values() if b["status"] == "pending_buy")
         for level, rung in target_rungs:
             if rung in open_prices: continue
