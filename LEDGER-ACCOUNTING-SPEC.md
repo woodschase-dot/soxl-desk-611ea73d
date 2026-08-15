@@ -19,13 +19,30 @@ this instrument is to *measure* it. So the ledger reports both and tracks their 
 - `illusion_delta = realized_speclot − realized_avgcost` — **the size of the accounting
   illusion, as a tracked quantity.** First trip: **+$54.08 − (−$26.84) = +$80.92.**
 
-## Predictions worth asserting
-- Under a grid in a **downtrend**, `illusion_delta` should **widen monotonically** (specific-lot
-  keeps booking +2.4% while the running average sits ever further above the harvest price). A
-  non-monotonic delta in a pure downtrend is a bug or a regime change — flag it.
-- `realized_speclot + unrealized_speclot ≡ realized_avgcost + unrealized_avgcost ≡ total NAV −
-  start`. The two conventions must reconcile to the **same total**; only the split differs.
-  Assert this identity every cycle — it's the cheap check that neither ledger is leaking.
+## Fields, identities, predictions
+
+### `illusion_delta` and its per-trip SIGN (the useful part — reviewer #5007)
+- `illusion_delta = realized_speclot − realized_avgcost` (cumulative). First trip: **+$80.92**.
+- **Per-trip** `delta_i = speclot_i − avgcost_i` is a live phase read, and its SIGN is the signal:
+  - `delta_i > 0` (running avg **above** sale price) → **harvesting into a hole** — the
+    accumulating, benign-*looking* but dangerous phase.
+  - `delta_i < 0` (running avg **below** sale price) → **harvesting out of one** — recovery.
+  Emit `harvest_phase = sign(delta_i)` as its own field: it reads the regime from *accounting*,
+  not price.
+- **Correction to the earlier "widens monotonically" claim (it was overstated):** the cumulative
+  delta widens **only while `avg_cost > sale_price`**. In a recovery, avgcost booking exceeds
+  speclot and each trip contributes a *negative* delta. Any monotonicity assertion must be
+  **conditional on `avg_cost > sale_price`**, never unconditional.
+
+### Reconcile identities — get this exactly right or it fails on the next held cycle
+- **Per convention, EVERY cycle (holds with inventory):**
+  `realized_X + unrealized_X ≡ NAV − start`, for each `X ∈ {speclot, avgcost}`, where
+  `unrealized_X` is computed in that convention's basis (per-block cost for speclot, running
+  average for avgcost). Assert this for each X *separately* — it's the cheap leak-check.
+- **Cross-convention realized equality holds ONLY when flat:** `realized_speclot ≡
+  realized_avgcost` **iff `position == 0`.** While inventory is held the two realized figures
+  differ by exactly the unrealized portion each allocates differently. Asserting their equality
+  mid-hold fails on the very next 47-share cycle — do NOT assert it unconditionally.
 
 ## Do NOT
 - Do **not** read Alpaca's `/positions` `unrealized_pl` / `avg_entry_price` into any ledger
