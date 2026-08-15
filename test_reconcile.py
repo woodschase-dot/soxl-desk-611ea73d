@@ -327,6 +327,34 @@ def d2b():
                 f"orders@130={len(at130)} (1) sells={len(sells())} (0)")
 
 
+def freed():
+    """Post-first-round-trip gap (reviewer #5004): close a HELD block on a real sell fill,
+    then its freed rung must be RE-PLACED as a fresh buy the SAME cycle when it's the top
+    window slot — while the lower resting rungs are left untouched (no duplicate). Uncovered
+    until now: no case closes a block AND checks its rung re-enters open_prices. If open_prices
+    were built before the closed block is removed, 140.87 stays suppressed and no re-buy appears
+    (the freed-slot-not-released bug). This is the live D1-reconcile path Monday's cycle must run."""
+    fresh(); B.pos = 0; B.px = 143.15
+    sid = B.seed("sell", 16, 144.25, status="filled", filled_avg_price=144.25)   # 140.87 block's TP, filled
+    lower = {"137.57": 137.57, "134.35": 134.35, "131.20": 131.20, "128.12": 128.12}
+    blocks = {"140.87": {"level": -3, "buy": 140.87, "target": 144.25, "shares": 16,
+                         "status": "pending_sell", "buy_id": None, "sell_id": sid, "buy_fill": 140.87}}
+    for k, pr in lower.items():
+        bid = B.seed("buy", 16, pr)
+        blocks[k] = {"level": -9, "buy": pr, "target": round(pr * 1.024, 2), "shares": 16,
+                     "status": "pending_buy", "buy_id": bid, "sell_id": None, "buy_fill": None}
+    put({"anchor": 151.26, "last_px": 143.15, "realized_pnl": 0.0, "equity_peak": 100202.32, "blocks": blocks})
+    run_capture()
+    s = json.load(open(fc.STATE))
+    booked = abs(s["realized_pnl"] - 16 * (144.25 - 140.87)) < 1e-6               # 54.08 specific-lot
+    ob = buys()
+    at_freed = [o for o in ob if round(float(o["limit_price"]), 2) == 140.87]
+    dupes = any(len([o for o in ob if round(float(o["limit_price"]), 2) == pr]) != 1 for pr in lower.values())
+    ok = booked and len(at_freed) == 1 and not dupes and len(ob) == 5
+    return ok, (f"realized={s['realized_pnl']:.2f}(=54.08) rebuy@140.87={len(at_freed)}(1) "
+                f"open_buys={len(ob)}(5) no_dupes={not dupes}")
+
+
 class FakeResp:
     """Minimal stand-in for the urllib response object _req uses as a context manager."""
     def __init__(self, body="", status=200):
@@ -411,6 +439,7 @@ CASES = [
     ("PART", "partial-qty sell coverage warns + adopts",            partial_qty),
     ("D2",   "cancel-fails-FILLED -> held, sell next cycle",        d2),
     ("D2b",  "cancel-fails-OPEN -> block untouched, no double",     d2b),
+    ("FREED","close block -> freed rung re-placed, lowers untouched",freed),
     ("REQ",  "_req OWN empty-body/204 branch (v2 json crash site)", req_empty),
     ("INV",  "multi-cycle: pending buys <= WINDOW_RUNGS every cycle", invariant),
 ]
