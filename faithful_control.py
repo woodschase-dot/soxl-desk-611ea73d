@@ -50,7 +50,8 @@ WINDOW_RUNGS   = 5         # pending buy rungs below price (patent 3-5; NOT Aaro
 BLOCK_PCT      = 0.025     # per-block size = 2.5% of the sizing basis (~= patent g=20%)
 EQUITY_BASIS   = "cash_available"   # cash_available | marked_nav
 PRICE_GUARD    = 0.35      # reject a quote that jumped >35% vs the last accepted cycle (bad-print guard)
-ARMED          = True      # <-- FILE GATE. ARMED 2026-08-13 after full review (D1-D4,R1-R3,N1-N2) via launchd (deterministic), single-scheduler.
+STALE_MAX_SEC  = 600       # D5: reject a quote whose trade timestamp `t` is older than this (feed-freeze guard)
+ARMED          = True      # <-- FILE GATE. RE-ARMED 2026-08-17 after reviewed ceremony (D5 staleness, D6 map-assert, D7a latefill, dual-convention ledger); suite 16/16. New reviewed baseline = this file's hash minus this line.
                            #     Second gate: env FAITHFUL_EXECUTION_ENABLED=true must also be set.
 
 BASE   = "https://paper-api.alpaca.markets"
@@ -95,11 +96,26 @@ def get_position():
     try: return _req("GET", f"{BASE}/v2/positions/{SYMBOL}")
     except Exception: return None
 def last_price():
-    try: return float(_req("GET", f"{DATA}/v2/stocks/{SYMBOL}/trades/latest")["trade"]["p"])
+    """Return (price, trade_timestamp). D5: the timestamp is the feed-freeze signal — a stuck
+    feed repeats a price with an OLD `t`, which the jump guard can't see. FMP fallback has no
+    broker `t` -> None -> treated as fresh (it's a live quote)."""
+    try:
+        tr = _req("GET", f"{DATA}/v2/stocks/{SYMBOL}/trades/latest")["trade"]
+        return float(tr["p"]), tr.get("t")
     except Exception:
         e = json.load(open(os.path.expanduser("~/.openclaw/config/env.json")))
         q = _req("GET", f"https://financialmodelingprep.com/stable/quote?symbol={SYMBOL}&apikey={e['FMP_API_KEY']}")
-        return float(q[0]["price"])
+        return float(q[0]["price"]), None
+
+def quote_age_sec(ts):
+    """Age of a trade timestamp in seconds. None/unparseable -> 0.0 (treated as fresh, never a
+    false staleness trip — D5 rejects on `t` age, not on price repetition)."""
+    if not ts: return 0.0
+    try:
+        d = dt.datetime.strptime(str(ts)[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=dt.timezone.utc)
+    except Exception:
+        return 0.0
+    return (dt.datetime.now(dt.timezone.utc) - d).total_seconds()
 def get_order(oid):  return _req("GET", f"{BASE}/v2/orders/{oid}")
 
 def list_open_orders():
@@ -158,23 +174,40 @@ def block_shares(basis, rung):
 def run():
     mode = "LIVE-PAPER" if LIVE else "DRY-RUN"
     acct = get_account(); equity = float(acct["equity"]); cash = float(acct["cash"])
-    px = last_price()
+    px, px_ts = last_price()
     st = load_state()
     blocks = st["blocks"]        # key -> {level, buy, target, shares, status, buy_id, sell_id, buy_fill}
+    st["cycle"] = st.get("cycle", 0) + 1
+    # Dual-convention ledger state (reviewer #5033: persist incrementally, never reconstruct from
+    # activities). Seed once from current held lots; declare the two conventions EQUAL at seed so
+    # illusion_delta measures FORWARD divergence only (past avgcost history is not re-derived).
+    for k, d in (("realized_avgcost", None), ("realized_resting", 0.0), ("realized_latefill", 0.0)):
+        st.setdefault(k, st["realized_pnl"] if d is None else d)
+    if "avgcost_shares" not in st:
+        held = [b for b in blocks.values() if b["status"] in ("held", "pending_sell") and b.get("buy_fill") and not b.get("synthetic")]
+        st["avgcost_shares"] = sum(b["shares"] for b in held)
+        st["avgcost_basis"] = round(sum(b["shares"] * b["buy_fill"] for b in held), 4)
 
     # ---- PRICE SANITY GUARD (reviewer D3): trip on a bad/implausible quote, but CONFIRM-ON-SECOND
-    #      so a genuine >35% move can't latch the guard forever; a trip is a LOUD (non-zero) exit. ----
+    #      so a genuine >35% move can't latch the guard forever; a trip is a LOUD (non-zero) exit.
+    #      D5: staleness (an old trade timestamp) is invalid-like — a frozen feed can't be confirmed
+    #      by a second read, so it skips every cycle until fresh (no latch, no confirm-on-second). ----
     last_px = st.get("last_px"); guard_px = st.get("guard_px")
-    invalid = (px is None or px <= 0)
-    jump = (last_px is not None and not invalid and abs(px / last_px - 1) > PRICE_GUARD)
+    age = quote_age_sec(px_ts)
+    stale = age > STALE_MAX_SEC
+    invalid = (px is None or px <= 0 or stale)
+    jump = (last_px is not None and not (px is None or px <= 0) and abs(px / last_px - 1) > PRICE_GUARD)
     if invalid or jump:
         confirmed = (jump and guard_px is not None and abs(px / guard_px - 1) <= PRICE_GUARD)
         if not confirmed:
             st["guard_px"] = (None if invalid else px)   # remember the suspect for next-cycle confirmation
             save_state(st)
+            reason = (f"STALE feed: trade age {age:.0f}s > {STALE_MAX_SEC}s" if stale
+                      else "invalid quote" if (px is None or px <= 0)
+                      else f">{PRICE_GUARD:.0%} jump")
             log(f"=== FAITHFUL SOXL CONTROL v3 [{mode}] {now()} === ⚠️ PRICE GUARD TRIPPED: "
-                f"px={px} vs last_accepted={last_px} (>{PRICE_GUARD:.0%} jump/invalid). "
-                f"NO orders this cycle; awaiting a confirming quote.")
+                f"px={px} vs last_accepted={last_px} ({reason}). "
+                f"NO orders this cycle; awaiting a {'fresh' if stale else 'confirming'} quote.")
             if LIVE:                                     # R3: the tail event is exactly what to record — write a flagged snapshot
                 p = get_position(); mv = float(p["market_value"]) if p else 0.0
                 upnl = float(p["unrealized_pl"]) if p else 0.0
@@ -231,6 +264,8 @@ def run():
                 o = get_order(b["buy_id"])
                 if o and o.get("status") == "filled":
                     b["buy_fill"] = float(o["filled_avg_price"]); b["status"] = "held"
+                    b["buy_fill_cycle"] = st["cycle"]                                    # D7: for the arm-lag measure
+                    st["avgcost_basis"] += b["shares"] * b["buy_fill"]; st["avgcost_shares"] += b["shares"]
                 elif o and o.get("status") in ("canceled", "expired", "rejected"):
                     del blocks[key]; continue
             if b["status"] == "held":                    # arm the rung-pegged conditional sell
@@ -243,6 +278,9 @@ def run():
                         log(f"  [RECONCILE] sell already resting @ {tgt:.2f}; adopted (no double-place)")
                 else:
                     b["sell_id"] = place_limit("sell", b["shares"], tgt)
+                b["sell_submit_px"] = px                                   # D7: cause instrumentation —
+                b["sell_marketable"] = (px >= tgt)                         #   marketable-on-submission = the F2 artifact,
+                b["sell_arm_cycle"] = st["cycle"]                          #   vs a resting order the market gaps through
                 b["status"] = "pending_sell"; save_state(st)
             if b["status"] == "pending_sell" and LIVE:
                 o = get_order(b["sell_id"])
@@ -250,7 +288,18 @@ def run():
                     if b.get("synthetic"):               # R1: unknown cost basis -> never fabricate realized P&L
                         log(f"  [SYNTHETIC] adopted sell filled @ {o.get('filled_avg_price')} — NOT booked to realized (no true cost basis)")
                     else:
-                        st["realized_pnl"] += b["shares"] * (float(o["filled_avg_price"]) - (b["buy_fill"] or b["buy"]))
+                        fill = float(o["filled_avg_price"]); bf = (b["buy_fill"] or b["buy"]); sh = b["shares"]; tgt = round(b["target"], 2)
+                        st["realized_pnl"]      += sh * (fill - bf)        # speclot (unchanged total)
+                        st["realized_resting"]  += sh * (tgt - bf)         # what a fill AT target would give
+                        st["realized_latefill"] += sh * (fill - tgt)       # latefill_excess = F2 contamination (fill above target)
+                        avg = (st["avgcost_basis"] / st["avgcost_shares"]) if st.get("avgcost_shares") else bf   # avg-cost basis
+                        st["realized_avgcost"]  += sh * (fill - avg)
+                        st["avgcost_basis"] = round(st["avgcost_basis"] - sh * avg, 4); st["avgcost_shares"] -= sh
+                        phase = "into-hole(+)" if avg > bf else "out-of-hole(-)" if avg < bf else "flat"   # per-trip harvest_phase
+                        lag = (b.get("sell_arm_cycle") or 0) - (b.get("buy_fill_cycle") or 0)
+                        log(f"  [TRIP] {sh}@{bf:.2f}->{fill:.2f} tgt {tgt:.2f} | latefill_excess ${sh*(fill-tgt):+.2f} "
+                            f"marketable={b.get('sell_marketable')} arm_lag={lag} | speclot ${sh*(fill-bf):+.2f} "
+                            f"avgcost ${sh*(fill-avg):+.2f} phase={phase}")
                     del blocks[key]
 
         # 2) anchor the fixed lattice (set once; re-anchor only when fully flat) -------
@@ -272,7 +321,8 @@ def run():
             else:                                         # D2: cancel failed -> may have FILLED; never drop blindly
                 o = get_order(b["buy_id"]) if LIVE else None
                 if o and o.get("status") == "filled":
-                    b["buy_fill"] = float(o["filled_avg_price"]); b["status"] = "held"; save_state(st)
+                    b["buy_fill"] = float(o["filled_avg_price"]); b["status"] = "held"; b["buy_fill_cycle"] = st["cycle"]
+                    st["avgcost_basis"] += b["shares"] * b["buy_fill"]; st["avgcost_shares"] += b["shares"]; save_state(st)
                     log(f"  [RECONCILE] out-of-window cancel FAILED but order FILLED @ {b['buy_fill']:.2f} -> held (sell next cycle)")
                 elif o and o.get("status") in ("canceled", "expired", "rejected"):
                     del blocks[key]; save_state(st)
@@ -295,18 +345,46 @@ def run():
     finally:
         save_state(st)
 
-    # 4) LEDGER SNAPSHOT (tail-first; marked NAV is the headline number) --------------
+    # 4) LEDGER SNAPSHOT (tail-first; marked NAV is the headline). Mark at qty*px and compute
+    #    unrealized from OUR OWN lots per convention — Alpaca's unrealized_pl/avg_entry are
+    #    audited-stale (2026-08-15, matched no convention, didn't move across a sale). ----
     pos = get_position()
-    upnl = float(pos["unrealized_pl"]) if pos else 0.0
-    mv   = float(pos["market_value"]) if pos else 0.0
+    pos_qty = abs(int(float(pos["qty"]))) if pos else 0
+    mv = pos_qty * px
+    held_lots = [b for b in blocks.values() if b["status"] in ("held", "pending_sell")
+                 and (b.get("buy_fill") or b.get("buy")) and not b.get("synthetic")]
+    unrl_spec = sum(b["shares"] * (px - (b["buy_fill"] or b["buy"])) for b in held_lots)   # per-block cost
+    unrl_avg  = mv - st.get("avgcost_basis", 0.0)                                          # running average
     marked_nav = cash + mv
     st["equity_peak"] = max(st.get("equity_peak") or marked_nav, marked_nav)
     ddown = (marked_nav / st["equity_peak"] - 1.0) if st["equity_peak"] else 0.0
+    if "start_nav" not in st:                              # NAV baseline: realized+unrealized reconciles to NAV-start
+        st["start_nav"] = round(marked_nav - st["realized_pnl"] - unrl_spec, 4)
+    illusion = st["realized_pnl"] - st["realized_avgcost"]
     n_held = sum(1 for b in blocks.values() if b["status"] in ("held", "pending_sell"))
     n_pend = sum(1 for b in blocks.values() if b["status"] == "pending_buy")
+
+    # D6: post-cycle order-mapping assert — alert-and-CONTINUE (reviewer #5033: never halt an armed
+    #     engine on a mapping edge case; reconcile recovers orphans, the assert flags recurrence).
+    if LIVE:
+        mapped = {b.get("buy_id") for b in blocks.values()} | {b.get("sell_id") for b in blocks.values()}
+        unmapped = [o for o in list_open_orders() if o.get("id") not in mapped]
+        if unmapped:
+            log("  [ASSERT] unmapped broker orders after reconcile (persistence/adopt gap): "
+                + ", ".join(f"{o['side']} {o['qty']}@{o['limit_price']} {o['id'][:8]}" for o in unmapped))
+    # reconcile identity per convention (alert-and-continue): realized_X + unrealized_X == NAV - start
+    tgt_pl = marked_nav - st.get("start_nav", marked_nav)
+    for lbl, r, u in (("speclot", st["realized_pnl"], unrl_spec), ("avgcost", st["realized_avgcost"], unrl_avg)):
+        if abs((r + u) - tgt_pl) > 0.05:
+            log(f"  [ASSERT] {lbl} identity off: realized {r:.2f} + unrealized {u:.2f} = {r+u:.2f} "
+                f"!= NAV-start {tgt_pl:.2f} (diff {r+u-tgt_pl:+.2f})")
+
     snap = {"ts": now(), "mode": mode, "price": px, "marked_nav": marked_nav, "cash": cash,
             "position_mv": mv, "exposure_pct": (mv / marked_nav * 100 if marked_nav else 0),
-            "unrealized_pnl": upnl, "realized_pnl_cum": st["realized_pnl"],
+            "unrealized_pnl": unrl_spec, "unrealized_avgcost": unrl_avg,
+            "realized_pnl_cum": st["realized_pnl"], "realized_avgcost_cum": st["realized_avgcost"],
+            "realized_resting_cum": st["realized_resting"], "realized_latefill_cum": st["realized_latefill"],
+            "illusion_delta": illusion, "harvest_phase": (1 if illusion > 0 else -1 if illusion < 0 else 0),
             "blocks_held": n_held, "blocks_pending": n_pend, "current_drawdown_pct": ddown * 100,
             "anchor": st["anchor"]}
     log("  ledger: " + json.dumps({k: (round(v, 2) if isinstance(v, float) else v)
@@ -315,7 +393,8 @@ def run():
         with open(LEDGER, "a") as f: f.write(json.dumps(snap) + "\n")
         save_state(st)
     log(f"  blocks: {n_held} held/selling, {n_pend} pending buys | exposure {snap['exposure_pct']:.1f}% "
-        f"| marked NAV ${marked_nav:,.2f} | realized ${st['realized_pnl']:.2f} | uPnL ${upnl:.2f}")
+        f"| marked NAV ${marked_nav:,.2f} | realized(spec) ${st['realized_pnl']:.2f} "
+        f"| realized(avg) ${st['realized_avgcost']:.2f} | latefill ${st['realized_latefill']:.2f} | uPnL ${unrl_spec:.2f}")
     return snap
 
 if __name__ == "__main__":

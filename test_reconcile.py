@@ -87,6 +87,9 @@ class FakeBroker:
         self.fill_on_cancel = set()     # oid fills the instant a DELETE is attempted (the D2 race)
         self.cancel_fails_open = set()   # DELETE fails transiently; order stays open (D2b)
         self.trade_ts = None            # D5: trade timestamp for trades/latest (None -> fresh)
+        self.hide_first_oo = set()      # D6: oids hidden from the FIRST list_open_orders call (simulate a reconcile miss)
+        self._oo_calls = 0
+        self.marketable_sells = False   # D7/LATEARM opt-in: a sell placed at/below market fills at market
 
     def seed(self, side, qty, limit, status="new", filled_avg_price=None):
         self.n += 1
@@ -129,7 +132,11 @@ class FakeBroker:
                     "unrealized_pl": "0", "avg_entry_price": f"{self.px:.2f}",
                     "current_price": f"{self.px:.2f}"}
         if method == "GET" and "/v2/orders?" in url:     # list_open_orders (query string)
-            return self._open()
+            self._oo_calls += 1
+            ops = self._open()
+            if self._oo_calls == 1 and self.hide_first_oo:      # D6: reconcile "misses" it -> D6 assert must catch it
+                ops = [o for o in ops if o["id"] not in self.hide_first_oo]
+            return ops
         if method == "GET" and "/v2/orders/" in url:     # get_order(oid)
             return self.orders.get(url.rsplit("/", 1)[1])
         if method == "POST" and url.endswith("/v2/orders"):
@@ -139,6 +146,9 @@ class FakeBroker:
                  "limit_price": body["limit_price"], "type": "limit",
                  "time_in_force": "gtc", "status": "new"}
             self.orders[oid] = o
+            lp = float(o["limit_price"])
+            if self.marketable_sells and o["side"] == "sell" and self.px >= lp:   # D7/LATEARM opt-in
+                o["status"] = "filled"; o["filled_avg_price"] = f"{self.px:.2f}"; self.pos -= int(float(o["qty"]))
             return o                                      # place_limit reads o["id"]
         if method == "DELETE" and "/v2/orders/" in url:
             oid = url.rsplit("/", 1)[1]
@@ -356,6 +366,49 @@ def freed():
                 f"open_buys={len(ob)}(5) no_dupes={not dupes}")
 
 
+def persist():
+    """D6: (1) a dropped-block order (broker has it, state doesn't) is adopted exactly once, and the
+    post-cycle assert stays CLEAN; (2) if reconcile MISSES an open order, the post-cycle assert must
+    FIRE (alert-and-continue) — the recurrence detector for the 128.12 save_state drop."""
+    # (1) drop -> single adopt, no double, assert clean
+    fresh(); B.pos = 16; B.px = 151.0
+    B.seed("buy", 16, 140.87)                                   # orphan buy, no block
+    put({"anchor": 151.26, "last_px": 151.0, "realized_pnl": 0.0, "equity_peak": None, "blocks": {}})
+    _, t1 = run_capture()
+    adopted = sum(1 for b in blocks_now().values() if round(b.get("buy", 0), 2) == 140.87)
+    at_140 = [o for o in buys() if round(float(o["limit_price"]), 2) == 140.87]
+    clean = "[ASSERT] unmapped" not in t1 and adopted == 1 and len(at_140) == 1
+    # (2) reconcile miss -> assert fires on the unmapped order (out-of-window so maintenance won't re-place it)
+    fresh(); B.pos = 16; B.px = 151.0
+    oid = B.seed("buy", 16, 120.00); B.hide_first_oo.add(oid)   # hidden from step-0 -> never adopted
+    put({"anchor": 151.26, "last_px": 151.0, "realized_pnl": 0.0, "equity_peak": None, "blocks": {}})
+    _, t2 = run_capture()
+    fires = "[ASSERT] unmapped broker orders" in t2 and oid[:8] in t2
+    ok = clean and fires
+    return ok, f"(1)adopt_once={adopted}(1) no_double={len(at_140)}(1) assert_clean={'[ASSERT] unmapped' not in t1} | (2)assert_fires={fires}"
+
+
+def latearm():
+    """D7(a): a sell armed while the market is ALREADY above its target (marketable-on-submission)
+    fills above target; the excess books to realized_latefill (F2 contamination) NOT realized_resting,
+    and the trip is tagged marketable=True. This is the live 144.25-block artifact, in a test."""
+    fresh(); B.pos = 16; B.px = 145.0; B.marketable_sells = True
+    put({"anchor": 151.0, "last_px": 145.0, "realized_pnl": 0.0, "equity_peak": None,
+         "avgcost_shares": 16, "avgcost_basis": 16 * 140.0, "realized_avgcost": 0.0,
+         "realized_resting": 0.0, "realized_latefill": 0.0,
+         "blocks": {"140.00": {"level": -5, "buy": 140.0, "target": 143.36, "shares": 16, "status": "held",
+                               "buy_id": None, "sell_id": None, "buy_fill": 140.0, "buy_fill_cycle": 1}}})
+    _, txt = run_capture()
+    s = json.load(open(fc.STATE))
+    resting  = abs(s["realized_resting"]  - 16 * (143.36 - 140.0)) < 1e-6    # 53.76 (fill AT target)
+    latefill = abs(s["realized_latefill"] - 16 * (145.0 - 143.36)) < 1e-6    # 26.24 (excess = the artifact)
+    speclot  = abs(s["realized_pnl"]      - 16 * (145.0 - 140.0)) < 1e-6     # 80.00 (resting + latefill)
+    tagged   = "marketable=True" in txt
+    ok = resting and latefill and speclot and tagged
+    return ok, (f"resting={s['realized_resting']:.2f}(53.76) latefill={s['realized_latefill']:.2f}(26.24) "
+                f"speclot={s['realized_pnl']:.2f}(80.00) marketable_tagged={tagged}")
+
+
 def stale():
     """D5: a trade timestamp older than STALE_MAX_SEC trips the guard (skip, alert, NO orders) —
     a frozen feed the jump-guard can't see. And a FRESH-but-identical price must NOT trip (no
@@ -462,6 +515,8 @@ CASES = [
     ("D2b",  "cancel-fails-OPEN -> block untouched, no double",     d2b),
     ("FREED","close block -> freed rung re-placed, lowers untouched",freed),
     ("STALE","D5 feed-freeze: old trade `t` trips; fresh identical doesn't", stale),
+    ("PERSIST","D6 dropped-order adopt-once + assert fires on reconcile miss", persist),
+    ("LATEARM","D7(a) marketable sell -> excess to realized_latefill, tagged", latearm),
     ("REQ",  "_req OWN empty-body/204 branch (v2 json crash site)", req_empty),
     ("INV",  "multi-cycle: pending buys <= WINDOW_RUNGS every cycle", invariant),
 ]
