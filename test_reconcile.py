@@ -86,6 +86,7 @@ class FakeBroker:
         self.equity = 100000.0
         self.fill_on_cancel = set()     # oid fills the instant a DELETE is attempted (the D2 race)
         self.cancel_fails_open = set()   # DELETE fails transiently; order stays open (D2b)
+        self.trade_ts = None            # D5: trade timestamp for trades/latest (None -> fresh)
 
     def seed(self, side, qty, limit, status="new", filled_avg_price=None):
         self.n += 1
@@ -118,7 +119,7 @@ class FakeBroker:
     def req(self, method, url, body=None):
         S = fc.SYMBOL
         if method == "GET" and url.endswith(f"/v2/stocks/{S}/trades/latest"):
-            return {"trade": {"p": self.px}}
+            return {"trade": {"p": self.px, "t": self.trade_ts}}
         if method == "GET" and url.endswith("/v2/account"):
             return {"equity": f"{self.equity:.2f}", "cash": f"{self.cash:.2f}"}
         if method == "GET" and url.endswith(f"/v2/positions/{S}"):
@@ -355,6 +356,26 @@ def freed():
                 f"open_buys={len(ob)}(5) no_dupes={not dupes}")
 
 
+def stale():
+    """D5: a trade timestamp older than STALE_MAX_SEC trips the guard (skip, alert, NO orders) —
+    a frozen feed the jump-guard can't see. And a FRESH-but-identical price must NOT trip (no
+    repetition false-positive; the check is on `t` age, not price change)."""
+    import datetime as _dt
+    def ts(delta): return (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=delta)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # (1) stale timestamp -> trip
+    fresh(); B.pos = 0; B.px = 151.0; B.trade_ts = ts(fc.STALE_MAX_SEC + 120)
+    put({"anchor": 151.0, "last_px": 151.0, "realized_pnl": 0.0, "equity_peak": None, "blocks": {}})
+    _, t1 = run_capture()
+    stale_trips = "PRICE GUARD TRIPPED" in t1 and "STALE" in t1 and len(buys()) == 0
+    # (2) fresh but identical price -> NOT rejected, ladder places
+    fresh(); B.pos = 0; B.px = 151.0; B.trade_ts = ts(5)
+    put({"anchor": 151.0, "last_px": 151.0, "realized_pnl": 0.0, "equity_peak": None, "blocks": {}})
+    run_capture()
+    fresh_ok = len(buys()) == fc.WINDOW_RUNGS
+    ok = stale_trips and fresh_ok
+    return ok, f"stale_trips={stale_trips} fresh_identical_places={fresh_ok} (buys={len(buys())}/{fc.WINDOW_RUNGS})"
+
+
 class FakeResp:
     """Minimal stand-in for the urllib response object _req uses as a context manager."""
     def __init__(self, body="", status=200):
@@ -440,6 +461,7 @@ CASES = [
     ("D2",   "cancel-fails-FILLED -> held, sell next cycle",        d2),
     ("D2b",  "cancel-fails-OPEN -> block untouched, no double",     d2b),
     ("FREED","close block -> freed rung re-placed, lowers untouched",freed),
+    ("STALE","D5 feed-freeze: old trade `t` trips; fresh identical doesn't", stale),
     ("REQ",  "_req OWN empty-body/204 branch (v2 json crash site)", req_empty),
     ("INV",  "multi-cycle: pending buys <= WINDOW_RUNGS every cycle", invariant),
 ]
