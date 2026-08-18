@@ -51,7 +51,7 @@ BLOCK_PCT      = 0.025     # per-block size = 2.5% of the sizing basis (~= paten
 EQUITY_BASIS   = "cash_available"   # cash_available | marked_nav
 PRICE_GUARD    = 0.35      # reject a quote that jumped >35% vs the last accepted cycle (bad-print guard)
 STALE_MAX_SEC  = 600       # D5: reject a quote whose trade timestamp `t` is older than this (feed-freeze guard)
-ARMED          = True      # <-- FILE GATE. RE-ARMED 2026-08-18 after review-fix ceremony (4 bugs + never-cancel-marketable + filled_qty partial-adopt + append-only ledger); suite 18/18. New reviewed baseline = this file's hash minus this line.
+ARMED          = True      # <-- RE-ARMED 2026-08-18 after #5043 (position-mismatch assert + equity_peak reset); suite 19/19. Reviewed baseline = this file hash minus this line.
                            #     Second gate: env FAITHFUL_EXECUTION_ENABLED=true must also be set.
 
 BASE   = "https://paper-api.alpaca.markets"
@@ -327,6 +327,14 @@ def run():
         pos_qty = 0
         if LIVE:
             p = get_position(); pos_qty = abs(int(float(p["qty"]))) if p else 0
+        # #5043: reconcile adopts orphan ORDERS but not orphan SHARES — list_open_orders() returns only
+        # OPEN orders, so filled inventory with no block/no resting sell is invisible to every recovery
+        # path (this forced the 08-18 manual edit). Detect it every cycle; alert-and-continue. Auto-adopt
+        # is deliberately NOT done here: inventing a cost basis for orphan shares is the R1 problem.
+        block_qty = sum(b["shares"] for b in blocks.values() if b["status"] in ("held", "pending_sell"))
+        if LIVE and pos_qty != block_qty:
+            log(f"  [ASSERT] position mismatch: broker {pos_qty} sh vs blocks {block_qty} sh "
+                f"({pos_qty - block_qty:+d} unmanaged) — orphan shares (no block/sell); needs reconcile")
         flat = (pos_qty == 0 and not any(b["status"] in ("held", "pending_sell") for b in blocks.values()))
         if st["anchor"] is None or (flat and not blocks):
             st["anchor"] = px

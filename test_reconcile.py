@@ -447,6 +447,19 @@ def partial_cancel():
     return ok, f"held={b and b['status']} shares={b and b.get('shares')}(9) buy_fill={b and b.get('buy_fill')} logged={'PARTIAL-filled' in txt}"
 
 
+def posmismatch():
+    """#5043: reconcile adopts orphan ORDERS but not orphan SHARES. Filled inventory with no block is
+    invisible (list_open_orders returns only OPEN orders) — this forced the 08-18 manual edit. The
+    position-mismatch assert makes it visible every cycle (alert-and-continue)."""
+    fresh(); B.pos = 25; B.px = 151.0                         # broker holds 25 sh
+    put({"anchor": 151.26, "last_px": 151.0, "realized_pnl": 0.0, "equity_peak": None,
+         "blocks": {"140.00": {"level": -5, "buy": 140.0, "target": 143.36, "shares": 16, "status": "held",
+                               "buy_id": None, "sell_id": None, "buy_fill": 140.0}}})   # blocks know only 16
+    _, txt = run_capture()
+    ok = "[ASSERT] position mismatch" in txt and "+9 unmanaged" in txt
+    return ok, f"assert_fires={ok} (broker 25 vs blocks 16 -> +9 unmanaged)"
+
+
 def stale():
     """D5: a trade timestamp older than STALE_MAX_SEC trips the guard (skip, alert, NO orders) —
     a frozen feed the jump-guard can't see. And a FRESH-but-identical price must NOT trip (no
@@ -557,6 +570,7 @@ CASES = [
     ("LATEARM","D7(a) marketable sell -> excess to realized_latefill, tagged", latearm),
     ("GAPKEEP","#5040 never cancel a marketable out-of-window buy", gapkeep),
     ("PARTIAL","#5040 cancel of partially-filled buy adopts filled qty", partial_cancel),
+    ("POSMIS","#5043 orphan-SHARES (not just orders) -> position-mismatch assert", posmismatch),
     ("REQ",  "_req OWN empty-body/204 branch (v2 json crash site)", req_empty),
     ("INV",  "multi-cycle: pending buys <= WINDOW_RUNGS every cycle", invariant),
 ]

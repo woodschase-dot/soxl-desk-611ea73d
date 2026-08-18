@@ -149,3 +149,5 @@ D1..D2b go **red on exactly the build before their own fix** → no case passes 
 
 ---
 *Reference implementation of the Decisive Investor block ladder; retained as the honest control arm. Backtest verdict: DISQUALIFIED-as-designed (volatility-harvesting martingale — many small wins hiding an open-ended tail). Aaron's July statement (−57% SOXL: +$23.5k realized / −$77.6k unrealized ≈ −$54k) is the real-money confirmation.*
+
+Reviewed-baseline hash (deployed must differ by exactly the ARMED literal): `da497a2332de773c167adb80a43af4aa402f6261d4d43f9174ded41b8c01975b` (2026-08-18, suite 19/19).
