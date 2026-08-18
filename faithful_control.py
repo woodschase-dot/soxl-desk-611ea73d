@@ -51,13 +51,15 @@ BLOCK_PCT      = 0.025     # per-block size = 2.5% of the sizing basis (~= paten
 EQUITY_BASIS   = "cash_available"   # cash_available | marked_nav
 PRICE_GUARD    = 0.35      # reject a quote that jumped >35% vs the last accepted cycle (bad-print guard)
 STALE_MAX_SEC  = 600       # D5: reject a quote whose trade timestamp `t` is older than this (feed-freeze guard)
-ARMED          = True      # <-- FILE GATE. RE-ARMED 2026-08-17 after reviewed ceremony (D5 staleness, D6 map-assert, D7a latefill, dual-convention ledger); suite 16/16. New reviewed baseline = this file's hash minus this line.
+ARMED          = True      # <-- FILE GATE. RE-ARMED 2026-08-18 after review-fix ceremony (4 bugs + never-cancel-marketable + filled_qty partial-adopt + append-only ledger); suite 18/18. New reviewed baseline = this file's hash minus this line.
                            #     Second gate: env FAITHFUL_EXECUTION_ENABLED=true must also be set.
 
 BASE   = "https://paper-api.alpaca.markets"
 DATA   = "https://data.alpaca.markets"
 STATE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "faithful_control_state.json")
 LEDGER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "faithful_control_ledger.jsonl")
+TRIPS  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "faithful_control_trips.jsonl")   # per-trip records (append-only)
+TEST_RUN = (os.environ.get("FAITHFUL_TEST_RUN", "false").lower() == "true")   # tags ledger/trip rows "test":true (append-only; never delete)
 LOCKFILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".faithful_control.lock")
 
 LIVE = (os.environ.get("FAITHFUL_EXECUTION_ENABLED", "false").lower() == "true") and ARMED
@@ -96,23 +98,26 @@ def get_position():
     try: return _req("GET", f"{BASE}/v2/positions/{SYMBOL}")
     except Exception: return None
 def last_price():
-    """Return (price, trade_timestamp). D5: the timestamp is the feed-freeze signal — a stuck
-    feed repeats a price with an OLD `t`, which the jump guard can't see. FMP fallback has no
-    broker `t` -> None -> treated as fresh (it's a live quote)."""
+    """Return (price, trade_timestamp, source). D5: the timestamp is the feed-freeze signal.
+    FMP fallback (#5040 fix 3) returns its OWN epoch `timestamp` so staleness still applies on the
+    path most likely to serve a cached quote; the caller also logs 'degraded' loudly every cycle."""
     try:
         tr = _req("GET", f"{DATA}/v2/stocks/{SYMBOL}/trades/latest")["trade"]
-        return float(tr["p"]), tr.get("t")
+        return float(tr["p"]), tr.get("t"), "alpaca"
     except Exception:
         e = json.load(open(os.path.expanduser("~/.openclaw/config/env.json")))
         q = _req("GET", f"https://financialmodelingprep.com/stable/quote?symbol={SYMBOL}&apikey={e['FMP_API_KEY']}")
-        return float(q[0]["price"]), None
+        return float(q[0]["price"]), q[0].get("timestamp"), "fmp"
 
 def quote_age_sec(ts):
-    """Age of a trade timestamp in seconds. None/unparseable -> 0.0 (treated as fresh, never a
-    false staleness trip — D5 rejects on `t` age, not on price repetition)."""
-    if not ts: return 0.0
+    """Age of a trade timestamp in seconds. Handles Alpaca ISO strings AND FMP epoch seconds.
+    None/unparseable -> 0.0 (fresh; D5 rejects on `t` age, not on price repetition)."""
+    if ts is None or ts == "": return 0.0
     try:
-        d = dt.datetime.strptime(str(ts)[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=dt.timezone.utc)
+        if isinstance(ts, (int, float)) or str(ts).isdigit():          # FMP epoch seconds
+            d = dt.datetime.fromtimestamp(float(ts), dt.timezone.utc)
+        else:
+            d = dt.datetime.strptime(str(ts)[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=dt.timezone.utc)
     except Exception:
         return 0.0
     return (dt.datetime.now(dt.timezone.utc) - d).total_seconds()
@@ -174,7 +179,9 @@ def block_shares(basis, rung):
 def run():
     mode = "LIVE-PAPER" if LIVE else "DRY-RUN"
     acct = get_account(); equity = float(acct["equity"]); cash = float(acct["cash"])
-    px, px_ts = last_price()
+    px, px_ts, px_src = last_price()
+    if px_src == "fmp":                                   # #5040 fix 3: fallback is a degraded mode — never silent
+        log(f"  ⚠️ [DEGRADED] Alpaca trades/latest failed; using FMP fallback quote (px={px}, ts={px_ts}). D5 applies if FMP ts present.")
     st = load_state()
     blocks = st["blocks"]        # key -> {level, buy, target, shares, status, buy_id, sell_id, buy_fill}
     st["cycle"] = st.get("cycle", 0) + 1
@@ -208,15 +215,18 @@ def run():
             log(f"=== FAITHFUL SOXL CONTROL v3 [{mode}] {now()} === ⚠️ PRICE GUARD TRIPPED: "
                 f"px={px} vs last_accepted={last_px} ({reason}). "
                 f"NO orders this cycle; awaiting a {'fresh' if stale else 'confirming'} quote.")
-            if LIVE:                                     # R3: the tail event is exactly what to record — write a flagged snapshot
-                p = get_position(); mv = float(p["market_value"]) if p else 0.0
-                upnl = float(p["unrealized_pl"]) if p else 0.0
+            if LIVE:                                     # R3: record the tail event — OWN-LOT marking (#5040 fix 1:
+                p = get_position(); pos_qty = abs(int(float(p["qty"]))) if p else 0   #   NOT Alpaca's deprecated market_value/unrealized_pl)
+                mv = pos_qty * px                         # mark at qty*px (px = the guard-suspect quote)
+                upnl = sum(b["shares"] * (px - (b.get("buy_fill") or b.get("buy"))) for b in blocks.values()
+                           if b["status"] in ("held", "pending_sell") and (b.get("buy_fill") or b.get("buy")) and not b.get("synthetic"))
                 mnav = cash + mv; peak = st.get("equity_peak") or mnav   # running max; a fall doesn't raise it
                 gsnap = {"ts": now(), "mode": mode, "price": px, "price_guard": "tripped",
                          "marked_nav": mnav, "cash": cash, "position_mv": mv, "unrealized_pnl": upnl,
                          "exposure_pct": (mv / mnav * 100 if mnav else 0),                  # N2: the kill metric,
                          "current_drawdown_pct": ((mnav / peak - 1) * 100 if peak else 0),  #     on the cycle it matters
                          "last_px": last_px}
+                if TEST_RUN: gsnap["test"] = True
                 with open(LEDGER, "a") as f: f.write(json.dumps(gsnap) + "\n")   # durable signal the reporter watches (R2)
             return {"ts": now(), "mode": mode, "price": px, "price_guard": "tripped", "last_px": last_px}
         log(f"  PRICE GUARD released: {px:.2f} confirmed by two consecutive quotes (was suspect {guard_px}).")
@@ -278,9 +288,9 @@ def run():
                         log(f"  [RECONCILE] sell already resting @ {tgt:.2f}; adopted (no double-place)")
                 else:
                     b["sell_id"] = place_limit("sell", b["shares"], tgt)
-                b["sell_submit_px"] = px                                   # D7: cause instrumentation —
-                b["sell_marketable"] = (px >= tgt)                         #   marketable-on-submission = the F2 artifact,
-                b["sell_arm_cycle"] = st["cycle"]                          #   vs a resting order the market gaps through
+                    b["sell_submit_px"] = px                               # D7 cause instrumentation — ONLY on real
+                    b["sell_marketable"] = (px >= tgt)                     #   placement; an adopted sell was armed
+                    b["sell_arm_cycle"] = st["cycle"]                      #   EARLIER, so stamping it now inflates arm_lag (#5040)
                 b["status"] = "pending_sell"; save_state(st)
             if b["status"] == "pending_sell" and LIVE:
                 o = get_order(b["sell_id"])
@@ -295,11 +305,22 @@ def run():
                         avg = (st["avgcost_basis"] / st["avgcost_shares"]) if st.get("avgcost_shares") else bf   # avg-cost basis
                         st["realized_avgcost"]  += sh * (fill - avg)
                         st["avgcost_basis"] = round(st["avgcost_basis"] - sh * avg, 4); st["avgcost_shares"] -= sh
-                        phase = "into-hole(+)" if avg > bf else "out-of-hole(-)" if avg < bf else "flat"   # per-trip harvest_phase
-                        lag = (b.get("sell_arm_cycle") or 0) - (b.get("buy_fill_cycle") or 0)
+                        # per-trip harvest_phase (#5040): sign of THIS trip's lot dispersion (avg vs its own
+                        # buy) — +1 harvesting into a hole, -1 out of one. NOT the cumulative illusion sign.
+                        hphase = 1 if avg > bf else -1 if avg < bf else 0
+                        arm_c, buy_c = b.get("sell_arm_cycle"), b.get("buy_fill_cycle")
+                        lag = (arm_c - buy_c) if (arm_c is not None and buy_c is not None) else None   # None for adopted sells
+                        trip = {"ts": now(), "shares": sh, "buy_fill": bf, "sell_fill": fill, "target": tgt,
+                                "latefill_excess": round(sh * (fill - tgt), 4), "sell_marketable": b.get("sell_marketable"),
+                                "arm_lag": lag, "speclot": round(sh * (fill - bf), 4), "avgcost": round(sh * (fill - avg), 4),
+                                "harvest_phase": hphase}
+                        if TEST_RUN: trip["test"] = True
+                        if LIVE:
+                            with open(TRIPS, "a") as f: f.write(json.dumps(trip) + "\n")   # append-only trip record
+                        st["last_trip"] = trip
                         log(f"  [TRIP] {sh}@{bf:.2f}->{fill:.2f} tgt {tgt:.2f} | latefill_excess ${sh*(fill-tgt):+.2f} "
                             f"marketable={b.get('sell_marketable')} arm_lag={lag} | speclot ${sh*(fill-bf):+.2f} "
-                            f"avgcost ${sh*(fill-avg):+.2f} phase={phase}")
+                            f"avgcost ${sh*(fill-avg):+.2f} harvest_phase={hphase}")
                     del blocks[key]
 
         # 2) anchor the fixed lattice (set once; re-anchor only when fully flat) -------
@@ -314,19 +335,32 @@ def run():
         # 3) maintain exactly the window: cancel out-of-window buys, place missing -----
         target_rungs = window_rungs(anchor, px)          # [(level, price), ...]
         target_prices = {pr for _, pr in target_rungs}
-        for key, b in list(blocks.items()):              # cancel pending buys outside the window
+        for key, b in list(blocks.items()):              # maintain the window
             if b["status"] != "pending_buy" or round(b["buy"], 2) in target_prices: continue
-            if cancel(b["buy_id"]):                       # confirmed cancel -> safe to drop the block
-                del blocks[key]; save_state(st)
-            else:                                         # D2: cancel failed -> may have FILLED; never drop blindly
-                o = get_order(b["buy_id"]) if LIVE else None
-                if o and o.get("status") == "filled":
-                    b["buy_fill"] = float(o["filled_avg_price"]); b["status"] = "held"; b["buy_fill_cycle"] = st["cycle"]
-                    st["avgcost_basis"] += b["shares"] * b["buy_fill"]; st["avgcost_shares"] += b["shares"]; save_state(st)
-                    log(f"  [RECONCILE] out-of-window cancel FAILED but order FILLED @ {b['buy_fill']:.2f} -> held (sell next cycle)")
-                elif o and o.get("status") in ("canceled", "expired", "rejected"):
-                    del blocks[key]; save_state(st)
-                # else: still live/pending -> leave it, retry next cycle
+            # Decision 1 (#5040): NEVER cancel a MARKETABLE out-of-window buy (limit >= px). On a
+            # gap-down it fills below its own limit — the strategy's single most profitable event and
+            # the source of Aaron's >2.4% trips. Racing to cancel it IS the defect; the lattice simply
+            # re-forms below. Only cancel genuinely-stale buys BELOW the market (won't fill).
+            if round(b["buy"], 2) >= px:
+                log(f"  [WINDOW] keep out-of-window MARKETABLE buy @ {b['buy']:.2f} (>= px {px:.2f}); will fill, not cancelling")
+                continue
+            if not LIVE:
+                del blocks[key]; continue
+            ok = cancel(b["buy_id"])
+            o = get_order(b["buy_id"])                     # ALWAYS re-read: a cancel can SUCCEED on a
+            fq = int(float(o.get("filled_qty") or 0)) if o else 0     # partially-filled order (status
+            if o and o.get("status") == "filled":          # canceled, filled_qty>0). Nothing read filled_qty before -> silent share loss (#5040).
+                b["buy_fill"] = float(o["filled_avg_price"]); b["status"] = "held"; b["buy_fill_cycle"] = st["cycle"]
+                st["avgcost_basis"] += b["shares"] * b["buy_fill"]; st["avgcost_shares"] += b["shares"]; save_state(st)
+                log(f"  [RECONCILE] out-of-window order FILLED @ {b['buy_fill']:.2f} -> held")
+            elif fq > 0:                                    # PARTIAL fill then cancel — adopt the filled portion, don't lose it
+                fp = float(o["filled_avg_price"]); b["buy_fill"] = fp; b["shares"] = fq
+                b["status"] = "held"; b["buy_fill_cycle"] = st["cycle"]
+                st["avgcost_basis"] += fq * fp; st["avgcost_shares"] += fq; save_state(st)
+                log(f"  [RECONCILE] cancel took {fq} PARTIAL-filled sh @ {fp:.2f} -> held (remainder cancelled; shares NOT lost)")
+            elif ok or (o and o.get("status") in ("canceled", "expired", "rejected")):
+                del blocks[key]; save_state(st)            # clean cancel, zero filled -> drop
+            # else: cancel failed and order still live -> leave, retry next cycle
 
         open_prices = {round(b["buy"], 2) for b in blocks.values()
                        if b.get("buy") is not None} | broker_buys   # D4 buys only; N1: skip synthetic (no invented price)
@@ -372,21 +406,27 @@ def run():
         if unmapped:
             log("  [ASSERT] unmapped broker orders after reconcile (persistence/adopt gap): "
                 + ", ".join(f"{o['side']} {o['qty']}@{o['limit_price']} {o['id'][:8]}" for o in unmapped))
-    # reconcile identity per convention (alert-and-continue): realized_X + unrealized_X == NAV - start
+    # reconcile identity per convention (alert-and-continue): realized_X + unrealized_X == NAV - start.
+    # EXPECTED to fire whenever a SYNTHETIC block exists (#5040 note): mv includes its shares but
+    # held_lots/avgcost exclude it (unknown basis). That's correct — it flags the un-based inventory —
+    # not a phantom bug. n_syn is reported so a reader can tell it apart from a real mismatch.
+    n_syn = sum(1 for b in blocks.values() if b.get("synthetic"))
     tgt_pl = marked_nav - st.get("start_nav", marked_nav)
     for lbl, r, u in (("speclot", st["realized_pnl"], unrl_spec), ("avgcost", st["realized_avgcost"], unrl_avg)):
         if abs((r + u) - tgt_pl) > 0.05:
             log(f"  [ASSERT] {lbl} identity off: realized {r:.2f} + unrealized {u:.2f} = {r+u:.2f} "
-                f"!= NAV-start {tgt_pl:.2f} (diff {r+u-tgt_pl:+.2f})")
+                f"!= NAV-start {tgt_pl:.2f} (diff {r+u-tgt_pl:+.2f}){' [synthetic block present — expected]' if n_syn else ''}")
 
     snap = {"ts": now(), "mode": mode, "price": px, "marked_nav": marked_nav, "cash": cash,
             "position_mv": mv, "exposure_pct": (mv / marked_nav * 100 if marked_nav else 0),
             "unrealized_pnl": unrl_spec, "unrealized_avgcost": unrl_avg,
             "realized_pnl_cum": st["realized_pnl"], "realized_avgcost_cum": st["realized_avgcost"],
             "realized_resting_cum": st["realized_resting"], "realized_latefill_cum": st["realized_latefill"],
-            "illusion_delta": illusion, "harvest_phase": (1 if illusion > 0 else -1 if illusion < 0 else 0),
+            "illusion_delta": illusion, "illusion_sign": (1 if illusion > 0 else -1 if illusion < 0 else 0),  # #5040: cumulative divergence sign, NOT per-trip harvest_phase (that's in the trips ledger)
+            "last_trip_harvest_phase": (st.get("last_trip") or {}).get("harvest_phase"),
             "blocks_held": n_held, "blocks_pending": n_pend, "current_drawdown_pct": ddown * 100,
             "anchor": st["anchor"]}
+    if TEST_RUN: snap["test"] = True
     log("  ledger: " + json.dumps({k: (round(v, 2) if isinstance(v, float) else v)
                                    for k, v in snap.items() if k != "ts"}))
     if LIVE:

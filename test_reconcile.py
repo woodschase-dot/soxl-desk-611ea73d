@@ -90,6 +90,7 @@ class FakeBroker:
         self.hide_first_oo = set()      # D6: oids hidden from the FIRST list_open_orders call (simulate a reconcile miss)
         self._oo_calls = 0
         self.marketable_sells = False   # D7/LATEARM opt-in: a sell placed at/below market fills at market
+        self.partial_on_cancel = {}     # #5040: oid -> qty that filled before the (successful) cancel
 
     def seed(self, side, qty, limit, status="new", filled_avg_price=None):
         self.n += 1
@@ -161,6 +162,11 @@ class FakeBroker:
                 o["status"] = "filled"; o["filled_avg_price"] = o["limit_price"]
                 self.pos += int(float(o["qty"]))
                 raise RuntimeError("422 order already filled")             # cancel() -> False, then get_order sees filled
+            if oid in self.partial_on_cancel:                              # #5040: cancel SUCCEEDS but N of qty already filled
+                q = self.partial_on_cancel[oid]
+                o["status"] = "canceled"; o["filled_qty"] = str(q); o["filled_avg_price"] = o["limit_price"]
+                self.pos += q
+                return None                                                # 204 -> cancel() True, but filled_qty>0
             if o["status"] in ("new", "accepted"):
                 o["status"] = "canceled"
                 return None                                # 204/empty -> success -> cancel() True
@@ -316,7 +322,7 @@ def d2():
     _, t1 = run_capture()                        # cycle 1: out-of-window cancel fails -> filled -> promote
     b = blocks_now().get("130.00")
     promoted = b is not None and b["status"] == "held" and b["buy_fill"] == 130.0
-    branchlog = "cancel FAILED but order FILLED" in t1
+    branchlog = "order FILLED" in t1
     run_capture()                                # cycle 2: held -> place its sell
     sell_ok = any(round(float(o["limit_price"]), 2) == 133.12 for o in sells())
     ok = promoted and branchlog and sell_ok
@@ -407,6 +413,38 @@ def latearm():
     ok = resting and latefill and speclot and tagged
     return ok, (f"resting={s['realized_resting']:.2f}(53.76) latefill={s['realized_latefill']:.2f}(26.24) "
                 f"speclot={s['realized_pnl']:.2f}(80.00) marketable_tagged={tagged}")
+
+
+def gapkeep():
+    """#5040 Decision 1: a MARKETABLE out-of-window buy (limit >= px, as after a gap-down) must NOT be
+    cancelled — it's about to fill below its limit, the strategy's best event. Only stale buys BELOW
+    market get cancelled. This is the 08-18 gap-down defect: the loop raced to cancel the winners."""
+    fresh(); B.pos = 0; B.px = 134.0
+    oid = B.seed("buy", 16, 147.71)                            # out-of-window at 134, but 147.71 >= 134 -> marketable
+    put({"anchor": 151.26, "last_px": 134.0, "realized_pnl": 0.0, "equity_peak": None,
+         "blocks": {"147.71": {"level": -1, "buy": 147.71, "target": 151.26, "shares": 16,
+                               "status": "pending_buy", "buy_id": oid, "sell_id": None, "buy_fill": None}}})
+    _, txt = run_capture()
+    b = blocks_now().get("147.71")
+    still_open = any(o["id"] == oid for o in buys())
+    ok = b is not None and b["status"] == "pending_buy" and still_open and "keep out-of-window MARKETABLE" in txt
+    return ok, f"kept_pending={b and b['status']} order_open={still_open} logged={'keep out-of-window MARKETABLE' in txt}"
+
+
+def partial_cancel():
+    """#5040: cancelling a PARTIALLY-filled buy must adopt the filled portion (read filled_qty), never
+    silently drop it. The 08-18 bug: cancel returned success on an order that had filled 9/16 sh, and
+    the block was del'd -> 9 shares orphaned. Nothing read filled_qty on the success path."""
+    fresh(); B.pos = 0; B.px = 151.0
+    oid = B.seed("buy", 16, 130.00); B.partial_on_cancel[oid] = 9        # 130 < 151 -> not marketable -> cancel path; 9 filled
+    put({"anchor": 151.26, "last_px": 151.0, "realized_pnl": 0.0, "equity_peak": None,
+         "blocks": {"130.00": {"level": -9, "buy": 130.0, "target": 133.12, "shares": 16,
+                               "status": "pending_buy", "buy_id": oid, "sell_id": None, "buy_fill": None}}})
+    _, txt = run_capture()
+    b = blocks_now().get("130.00")
+    ok = (b is not None and b["status"] == "held" and b["shares"] == 9
+          and abs(b["buy_fill"] - 130.0) < 1e-6 and "PARTIAL-filled" in txt)
+    return ok, f"held={b and b['status']} shares={b and b.get('shares')}(9) buy_fill={b and b.get('buy_fill')} logged={'PARTIAL-filled' in txt}"
 
 
 def stale():
@@ -517,6 +555,8 @@ CASES = [
     ("STALE","D5 feed-freeze: old trade `t` trips; fresh identical doesn't", stale),
     ("PERSIST","D6 dropped-order adopt-once + assert fires on reconcile miss", persist),
     ("LATEARM","D7(a) marketable sell -> excess to realized_latefill, tagged", latearm),
+    ("GAPKEEP","#5040 never cancel a marketable out-of-window buy", gapkeep),
+    ("PARTIAL","#5040 cancel of partially-filled buy adopts filled qty", partial_cancel),
     ("REQ",  "_req OWN empty-body/204 branch (v2 json crash site)", req_empty),
     ("INV",  "multi-cycle: pending buys <= WINDOW_RUNGS every cycle", invariant),
 ]
